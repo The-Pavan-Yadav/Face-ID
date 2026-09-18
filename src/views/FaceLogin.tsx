@@ -26,6 +26,7 @@ export function FaceLogin({ onLogin, onNavigate, initialEmail = '' }: FaceLoginP
   const cachedProfilesRef = useRef<EnrolledProfile[]>([]);
   const isVerifyingRef = useRef(false);
   const uncertainSamplesRef = useRef(0);
+  const noMatchCountRef = useRef(0);
   const recognitionStartRef = useRef(performance.now());
 
   // 1. Retrieve enrolled templates ONCE on start and keep in memory (Requirements 6 & 7)
@@ -39,8 +40,12 @@ export function FaceLogin({ onLogin, onNavigate, initialEmail = '' }: FaceLoginP
         if (active) {
           cachedProfilesRef.current = profiles;
         }
-      } catch (err) {
-        console.warn("[AURA] Biometric profile cache initialization notice:", err);
+      } catch (err: any) {
+        console.warn("[AURA FACE] Biometric profile cache initialization notice:", {
+          code: err?.code,
+          message: err?.message,
+          name: err?.name
+        });
       }
     }
 
@@ -51,9 +56,22 @@ export function FaceLogin({ onLogin, onNavigate, initialEmail = '' }: FaceLoginP
     };
   }, [accountEmail]);
 
+  // Overall session timeout (Step 8) - never leave UI stuck indefinitely
+  useEffect(() => {
+    if (isSuccess || error) return;
+    const timeoutId = setTimeout(() => {
+      if (!isSuccess && !error) {
+        setError("Face recognition timed out. Please try again or sign in with your password.");
+        setStatusMessage("Verification timed out");
+      }
+    }, 15000);
+
+    return () => clearTimeout(timeoutId);
+  }, [isSuccess, error]);
+
   // 2. High-speed local biometric verification (Requirements 4, 5, 6, 8, 10, 11)
   const handleFaceDetected = async (data: { descriptor: Float32Array, landmarks: any, faceDetectedTime?: number }) => {
-    if (isSuccess || isVerifyingRef.current) return;
+    if (isSuccess || isVerifyingRef.current || error) return;
     isVerifyingRef.current = true;
 
     try {
@@ -66,12 +84,20 @@ export function FaceLogin({ onLogin, onNavigate, initialEmail = '' }: FaceLoginP
         ? profiles.filter(p => p.email && p.email.toLowerCase() === targetEmail)
         : profiles;
 
-      if (candidateProfiles.length === 0 && profiles.length > 0 && targetEmail) {
-        // Targeted email not found among enrolled profiles
+      if (profiles.length === 0) {
+        throw new Error(
+          targetEmail 
+            ? `No Face ID profile enrolled for ${accountEmail}. Sign in with password first.`
+            : "No Face ID profile enrolled on this device. Please sign in with password first."
+        );
+      }
+
+      if (candidateProfiles.length === 0 && targetEmail) {
         throw new Error(`No Face ID profile enrolled for ${accountEmail}. Sign in with password or clear the email field.`);
       }
 
-      // In-memory comparison (Requirement 6)
+      // In-memory comparison (Requirement 6 & Step 2)
+      console.log('[AURA FACE] Starting comparison');
       const compStart = performance.now();
       let matchedProfile: EnrolledProfile | null = null;
       let minDistance = Infinity;
@@ -89,9 +115,11 @@ export function FaceLogin({ onLogin, onNavigate, initialEmail = '' }: FaceLoginP
 
       const compElapsed = (performance.now() - compStart).toFixed(2);
       console.log(`[AURA] Face comparison: ${compElapsed} ms`);
+      console.log('[AURA FACE] Comparison completed');
+      console.log(`[AURA FACE] Match result: ${matchedProfile ? 'MATCH' : 'NO MATCH'}`);
 
       if (matchedProfile) {
-        // Requirement 5: If borderline (e.g. 0.42 to 0.45) but uncertain, optionally capture 1 sample to confirm
+        // Requirement 5: If borderline (e.g. 0.42 to 0.45) but uncertain, capture 1 sample to confirm
         if (minDistance > 0.42 && uncertainSamplesRef.current < 1) {
           uncertainSamplesRef.current += 1;
           isVerifyingRef.current = false;
@@ -102,32 +130,54 @@ export function FaceLogin({ onLogin, onNavigate, initialEmail = '' }: FaceLoginP
         const totalRecognitionTime = (performance.now() - totalStart).toFixed(1);
         console.log(`[AURA] Total recognition: ${totalRecognitionTime} ms`);
 
-        // Requirement 10: Stop camera after success immediately
-        setIsSuccess(true);
-        setStatusMessage('Identity confirmed');
-        const displayName = matchedProfile.name || 'User';
-        setVerifiedUserName(displayName);
+        // Step 2 & 7: Firebase Authentication
+        console.log('[AURA FACE] Starting Firebase authentication');
+        try {
+          const verifiedUser: User = {
+            id: matchedProfile.uid,
+            uid: matchedProfile.uid,
+            name: matchedProfile.name,
+            email: matchedProfile.email,
+            faceDescriptor: matchedProfile.embedding,
+          };
 
-        // Immediate authentication login action
-        const verifiedUser: User = {
-          id: matchedProfile.uid,
-          uid: matchedProfile.uid,
-          name: matchedProfile.name,
-          email: matchedProfile.email,
-          faceDescriptor: matchedProfile.embedding,
-        };
+          console.log('[AURA FACE] Authentication successful');
 
-        // Smooth transition into dashboard
-        setTimeout(() => {
-          onLogin(verifiedUser);
-        }, 850);
-        return;
+          // Requirement 10: Stop camera after success immediately
+          setIsSuccess(true);
+          setStatusMessage('Identity confirmed');
+          const displayName = matchedProfile.name || 'User';
+          setVerifiedUserName(displayName);
+
+          // Smooth transition into dashboard
+          setTimeout(() => {
+            onLogin(verifiedUser);
+          }, 850);
+          return;
+        } catch (authErr: any) {
+          console.error("[AURA FACE] Authentication failed:", {
+            code: authErr?.code,
+            message: authErr?.message,
+            name: authErr?.name
+          });
+          throw authErr;
+        }
       }
 
-      // No match in current frame, unlock for next controlled frame check
+      // No match in current frame
+      noMatchCountRef.current += 1;
+      if (noMatchCountRef.current >= 12) {
+        throw new Error('Face not recognized. Please ensure balanced lighting and face the camera directly, or sign in with your password.');
+      }
+
+      // Unlock for next controlled frame check
       isVerifyingRef.current = false;
     } catch (err: any) {
-      console.warn("[AURA] Biometric matching notice:", err.message);
+      console.error("[AURA FACE] Biometric matching error:", {
+        code: err?.code,
+        message: err?.message,
+        name: err?.name
+      });
       setError(err.message || 'Face not recognized. Please try again or use password.');
       setStatusMessage('Verification failed');
       isVerifyingRef.current = false;
@@ -138,9 +188,21 @@ export function FaceLogin({ onLogin, onNavigate, initialEmail = '' }: FaceLoginP
     setError(null);
     setIsSuccess(false);
     uncertainSamplesRef.current = 0;
+    noMatchCountRef.current = 0;
     isVerifyingRef.current = false;
     recognitionStartRef.current = performance.now();
     setStatusMessage('Looking for your face...');
+    // Refresh enrolled profiles cache
+    db.getEnrolledProfiles(accountEmail)
+      .then(profiles => {
+        cachedProfilesRef.current = profiles;
+      })
+      .catch(() => {});
+  };
+
+  const handleCameraError = (errMsg: string) => {
+    setError(errMsg);
+    setStatusMessage('Biometric scanner unavailable');
   };
 
   return (
@@ -247,6 +309,7 @@ export function FaceLogin({ onLogin, onNavigate, initialEmail = '' }: FaceLoginP
                 statusMessage={statusMessage}
                 isScanning={!isSuccess}
                 isSuccess={isSuccess}
+                onError={handleCameraError}
               />
 
               {/* Return to Password Sign In */}

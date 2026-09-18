@@ -1,6 +1,6 @@
 import { auth, db as firestore } from './firebase';
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword } from 'firebase/auth';
-import { doc, setDoc, getDoc, serverTimestamp, runTransaction } from 'firebase/firestore';
+import { doc, setDoc, getDoc, getDocs, collection, query, where, serverTimestamp, runTransaction } from 'firebase/firestore';
 import { User } from '../types';
 
 export const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000; // 30 days in milliseconds
@@ -441,6 +441,7 @@ export const db = {
   },
 
   async getEnrolledProfiles(emailFilter?: string): Promise<EnrolledProfile[]> {
+    console.log('[AURA FACE] Loading enrolled profile');
     const normalizedEmail = emailFilter?.trim().toLowerCase();
     const profiles: EnrolledProfile[] = [];
 
@@ -466,7 +467,7 @@ export const db = {
 
               if (normalizedEmail) {
                 if (prof.email.toLowerCase() === normalizedEmail) {
-                  return [prof]; // Exact targeted account matched
+                  profiles.push(prof);
                 }
               } else {
                 profiles.push(prof);
@@ -475,8 +476,12 @@ export const db = {
           } catch {}
         }
       }
-    } catch (e) {
-      console.warn("[AURA] Local biometric cache read notice:", e);
+    } catch (e: any) {
+      console.warn("[AURA FACE] Local biometric cache read notice:", {
+        code: e?.code,
+        message: e?.message,
+        name: e?.name,
+      });
     }
 
     // 2. Also check direct localStorage keys in case index was bypassed
@@ -506,6 +511,53 @@ export const db = {
       } catch {}
     }
 
+    // 3. Attempt Firestore query for remote enrolled profiles if available
+    try {
+      if (normalizedEmail) {
+        const q = query(collection(firestore, 'users'), where('email', '==', normalizedEmail));
+        const snap = await getDocs(q);
+        snap.forEach((d) => {
+          const data = d.data();
+          const emb = data.faceDescriptor || data.faceProfile?.embedding;
+          if (emb && Array.isArray(emb) && emb.length === 128) {
+            if (!profiles.some(p => p.uid === d.id)) {
+              profiles.push({
+                uid: d.id,
+                name: data.name || 'User',
+                email: data.email || normalizedEmail,
+                embedding: Array.from(emb),
+                sampleCount: data.sampleCount || 1,
+              });
+            }
+          }
+        });
+      } else {
+        const snap = await getDocs(collection(firestore, 'users'));
+        snap.forEach((d) => {
+          const data = d.data();
+          const emb = data.faceDescriptor || data.faceProfile?.embedding;
+          if (emb && Array.isArray(emb) && emb.length === 128) {
+            if (!profiles.some(p => p.uid === d.id)) {
+              profiles.push({
+                uid: d.id,
+                name: data.name || 'User',
+                email: data.email || '',
+                embedding: Array.from(emb),
+                sampleCount: data.sampleCount || 1,
+              });
+            }
+          }
+        });
+      }
+    } catch (fsErr: any) {
+      console.warn("[AURA FACE] Remote enrolled profile sync notice:", {
+        code: fsErr?.code,
+        message: fsErr?.message,
+        name: fsErr?.name,
+      });
+    }
+
+    console.log('[AURA FACE] Enrolled profile loaded');
     return profiles;
   },
 

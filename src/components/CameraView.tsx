@@ -7,13 +7,15 @@ interface CameraViewProps {
   statusMessage: string;
   isScanning?: boolean;
   isSuccess?: boolean;
+  onError?: (errorMessage: string) => void;
 }
 
 export function CameraView({ 
   onFaceDetected, 
   statusMessage, 
   isScanning = true,
-  isSuccess = false 
+  isSuccess = false,
+  onError
 }: CameraViewProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -23,41 +25,60 @@ export function CameraView({
   const isProcessingRef = useRef(false);
   const cameraStartTimeRef = useRef(performance.now());
 
+  const initCameraAndModels = async (activeCheck: () => boolean) => {
+    try {
+      // Concurrently ensure model is preloaded/loading with proper error tracking
+      loadFaceModels().catch((modelErr: any) => {
+        console.error("[AURA FACE] Model loading error in camera setup:", {
+          code: modelErr?.code,
+          message: modelErr?.message,
+          name: modelErr?.name
+        });
+        if (activeCheck()) {
+          const msg = "Face recognition is temporarily unavailable.";
+          setError(msg);
+          onError?.(msg);
+        }
+      });
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { 
+          facingMode: "user",
+          width: { ideal: 640 }, 
+          height: { ideal: 480 } 
+        },
+        audio: false
+      });
+
+      if (!activeCheck()) {
+        stream.getTracks().forEach(t => t.stop());
+        return;
+      }
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        streamRef.current = stream;
+      }
+    } catch (err: any) {
+      console.error("[AURA FACE] Camera access error:", {
+        code: err?.code,
+        message: err?.message,
+        name: err?.name
+      });
+      if (activeCheck()) {
+        const msg = "Camera access unavailable. Please grant camera permissions to authenticate with Face ID.";
+        setError(msg);
+        onError?.(msg);
+      }
+    }
+  };
+
   // 1. Initialize camera immediately on mount (Requirement 2)
   useEffect(() => {
     let active = true;
     cameraStartTimeRef.current = performance.now();
 
-    async function setupCamera() {
-      try {
-        // Concurrently ensure model is preloaded/loading without blocking camera access
-        loadFaceModels().catch(() => {});
-
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: { 
-            facingMode: "user",
-            width: { ideal: 640 }, 
-            height: { ideal: 480 } 
-          },
-          audio: false
-        });
-
-        if (!active) {
-          stream.getTracks().forEach(t => t.stop());
-          return;
-        }
-
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-          streamRef.current = stream;
-        }
-      } catch (err) {
-        console.error("[AURA] Camera access error:", err);
-        setError("Camera access unavailable. Please grant camera permissions to authenticate with Face ID.");
-      }
-    }
-
-    setupCamera();
+    initCameraAndModels(() => active);
 
     return () => {
       active = false;
@@ -113,8 +134,17 @@ export function CameraView({
             } else {
               setHasFace(false);
             }
-          } catch (err) {
-            console.warn("[AURA] Frame analysis notice:", err);
+          } catch (err: any) {
+            console.warn("[AURA FACE] Frame analysis notice:", {
+              code: err?.code,
+              message: err?.message,
+              name: err?.name
+            });
+            if (err?.message?.includes('Face recognition is temporarily unavailable') || err?.name === 'TimeoutError') {
+              const msg = "Face recognition is temporarily unavailable.";
+              setError(msg);
+              onError?.(msg);
+            }
           } finally {
             isProcessingRef.current = false;
           }
@@ -131,7 +161,14 @@ export function CameraView({
     return () => {
       if (animationFrameId) cancelAnimationFrame(animationFrameId);
     };
-  }, [isReady, error, isSuccess, isScanning, onFaceDetected]);
+  }, [isReady, error, isSuccess, isScanning, onFaceDetected, onError]);
+
+  const handleRetry = () => {
+    setError(null);
+    setIsReady(false);
+    setHasFace(false);
+    initCameraAndModels(() => true);
+  };
 
   return (
     <div className="flex flex-col items-center space-y-4 w-full">
@@ -149,6 +186,13 @@ export function CameraView({
               <p className="text-xs text-[#626873] leading-relaxed max-w-[220px]">
                 {error}
               </p>
+              <button
+                type="button"
+                onClick={handleRetry}
+                className="mt-1 px-3.5 py-1.5 rounded-lg bg-[#111318] text-white text-xs font-medium hover:bg-slate-800 transition-colors"
+              >
+                Try Again
+              </button>
             </div>
           ) : (
             <>

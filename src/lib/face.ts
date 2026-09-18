@@ -1,14 +1,27 @@
 import * as faceapi from '@vladmandic/face-api';
 
-const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
+const CDN_MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
 
-// Singleton shared initialization promise (Requirement 9)
+// Determine production-safe model path
+function getLocalModelUrl(): string {
+  if (typeof window !== 'undefined' && window.location && window.location.origin) {
+    return `${window.location.origin}/models`;
+  }
+  return '/models';
+}
+
+// Singleton shared initialization promise (Step 4)
 let faceModelPromise: Promise<void> | null = null;
 let modelsLoaded = false;
+let modelLoadError: Error | null = null;
 const modelReadyListeners: Array<() => void> = [];
 
 export function isFaceModelLoaded(): boolean {
   return modelsLoaded;
+}
+
+export function getFaceModelError(): Error | null {
+  return modelLoadError;
 }
 
 export function addModelReadyListener(listener: () => void): () => void {
@@ -23,7 +36,19 @@ export function addModelReadyListener(listener: () => void): () => void {
   };
 }
 
-export function loadFaceModels(): Promise<void> {
+async function loadModelsFromUri(baseUri: string): Promise<void> {
+  await Promise.all([
+    faceapi.nets.tinyFaceDetector.loadFromUri(baseUri),
+    faceapi.nets.faceLandmark68Net.loadFromUri(baseUri),
+    faceapi.nets.faceRecognitionNet.loadFromUri(baseUri),
+  ]);
+}
+
+/**
+ * Singleton model initialization (loadModelsOnce)
+ * Tries local static assets first, with resilient fallback to CDN.
+ */
+export function loadModelsOnce(): Promise<void> {
   if (modelsLoaded) {
     return Promise.resolve();
   }
@@ -32,29 +57,62 @@ export function loadFaceModels(): Promise<void> {
     const modelStart = performance.now();
     faceModelPromise = (async () => {
       try {
-        await Promise.all([
-          faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
-          faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-          faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
-        ]);
+        // Enforce a 12-second timeout so the UI is never permanently blocked
+        const loadWithTimeout = async () => {
+          try {
+            // 1. Try local production-safe assets (/models)
+            const localUrl = getLocalModelUrl();
+            await loadModelsFromUri(localUrl);
+          } catch (localErr: any) {
+            console.warn("[AURA FACE] Local model load notice, attempting CDN fallback:", {
+              code: localErr?.code,
+              message: localErr?.message,
+              name: localErr?.name
+            });
+            // 2. Resilient fallback to CDN
+            await loadModelsFromUri(CDN_MODEL_URL);
+          }
+        };
+
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          setTimeout(() => {
+            const err = new Error("Face recognition models took too long to load.");
+            err.name = "TimeoutError";
+            reject(err);
+          }, 12000);
+        });
+
+        await Promise.race([loadWithTimeout(), timeoutPromise]);
+
         modelsLoaded = true;
+        modelLoadError = null;
         const elapsed = (performance.now() - modelStart).toFixed(1);
-        console.log(`[AURA] Model ready: ${elapsed} ms`);
-        
+        console.log(`[AURA FACE] Models ready: ${elapsed} ms`);
+
         // Notify all subscribers
         modelReadyListeners.forEach(fn => {
           try { fn(); } catch (err) { console.error(err); }
         });
         modelReadyListeners.length = 0;
-      } catch (error) {
+      } catch (error: any) {
         faceModelPromise = null;
-        console.error("Failed to load face-api models:", error);
-        throw new Error("Could not initialize face recognition engine.");
+        modelsLoaded = false;
+        modelLoadError = error;
+        console.error("[AURA FACE] Failed to load face-api models:", {
+          code: error?.code,
+          message: error?.message,
+          name: error?.name
+        });
+        throw new Error("Face recognition is temporarily unavailable.");
       }
     })();
   }
 
   return faceModelPromise;
+}
+
+export function loadFaceModels(): Promise<void> {
+  return loadModelsOnce();
 }
 
 export interface QualityFaceDetection {
@@ -75,8 +133,21 @@ export async function detectQualityFaceAndEmbedding(video: HTMLVideoElement): Pr
   const frameStart = performance.now();
   await loadFaceModels();
 
+  const isReady = isFaceModelLoaded();
+  console.log(`[AURA FACE] Face model status: ${isReady ? 'READY' : 'NOT READY'}`);
+
   const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.55 });
-  const detections = await faceapi.detectAllFaces(video, options);
+  let detections: any[];
+  try {
+    detections = await faceapi.detectAllFaces(video, options);
+  } catch (detErr: any) {
+    console.error("[AURA FACE] Face detector error:", {
+      code: detErr?.code,
+      message: detErr?.message,
+      name: detErr?.name
+    });
+    throw detErr;
+  }
 
   if (!detections || detections.length === 0) {
     return { status: 'no_face', message: 'Looking for your face...' };
@@ -111,15 +182,28 @@ export async function detectQualityFaceAndEmbedding(video: HTMLVideoElement): Pr
   }
 
   // Exactly one well-centered, high-quality face detected!
+  console.log('[AURA FACE] Face detected');
   const faceDetectedTime = (performance.now() - frameStart).toFixed(1);
   console.log(`[AURA] Face detected: ${faceDetectedTime} ms`);
 
   // Compute landmarks and 128-dimensional embedding
+  console.log('[AURA FACE] Starting embedding generation');
   const embedStart = performance.now();
-  const faceWithDescriptor = await faceapi
-    .detectSingleFace(video, options)
-    .withFaceLandmarks()
-    .withFaceDescriptor();
+
+  let faceWithDescriptor: any;
+  try {
+    faceWithDescriptor = await faceapi
+      .detectSingleFace(video, options)
+      .withFaceLandmarks()
+      .withFaceDescriptor();
+  } catch (embedErr: any) {
+    console.error("[AURA FACE] Embedding generation failed:", {
+      code: embedErr?.code,
+      message: embedErr?.message,
+      name: embedErr?.name
+    });
+    throw embedErr;
+  }
 
   if (!faceWithDescriptor || !faceWithDescriptor.descriptor) {
     return { status: 'poor_quality', message: 'Repositioning...' };
