@@ -1,229 +1,178 @@
-import React, { useState, useEffect } from 'react';
-import { CheckCircle2, ScanFace, ArrowLeft, RefreshCw, Lock, AlertCircle, Sparkles } from 'lucide-react';
+import React, { useState, useEffect, useRef } from 'react';
+import { CheckCircle2, ArrowLeft, RefreshCw, Lock, AlertCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { AuthLayout } from '../components/AuthLayout';
 import { CameraView } from '../components/CameraView';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { User } from '../types';
-import { signInWithCustomToken } from 'firebase/auth';
-import { auth } from '../lib/firebase';
-import { db } from '../lib/db';
-import { doc, getDoc } from 'firebase/firestore';
-import { db as firestore } from '../lib/firebase';
+import { db, EnrolledProfile } from '../lib/db';
 import { calculateEuclideanDistance } from '../lib/face';
 
 interface FaceLoginProps {
   onLogin: (user: User) => void;
   onNavigate: (view: 'login') => void;
+  initialEmail?: string;
 }
 
-export function FaceLogin({ onLogin, onNavigate }: FaceLoginProps) {
-  const [accountEmail, setAccountEmail] = useState('');
-  const [statusMessage, setStatusMessage] = useState('Initializing Face ID...');
+export function FaceLogin({ onLogin, onNavigate, initialEmail = '' }: FaceLoginProps) {
+  const [accountEmail, setAccountEmail] = useState(initialEmail);
+  const [statusMessage, setStatusMessage] = useState('Looking for your face...');
   const [error, setError] = useState<string | null>(null);
   const [isSuccess, setIsSuccess] = useState(false);
   const [verifiedUserName, setVerifiedUserName] = useState<string>('');
-  const [livenessState, setLivenessState] = useState<'straight' | 'turn' | 'verifying'>('straight');
 
+  // Cached enrolled templates in memory (Requirements 6 & 7)
+  const cachedProfilesRef = useRef<EnrolledProfile[]>([]);
+  const isVerifyingRef = useRef(false);
+  const uncertainSamplesRef = useRef(0);
+  const recognitionStartRef = useRef(performance.now());
+
+  // 1. Retrieve enrolled templates ONCE on start and keep in memory (Requirements 6 & 7)
   useEffect(() => {
-    // Initial camera stabilization
-    const timer = setTimeout(() => {
-      setStatusMessage('Looking for your face...');
-    }, 1200);
-    return () => clearTimeout(timer);
-  }, []);
+    let active = true;
+    recognitionStartRef.current = performance.now();
 
-  const handleFaceDetected = async (data: { descriptor: Float32Array, landmarks: any }) => {
-    if (livenessState === 'verifying' || isSuccess) return;
-
-    if (livenessState === 'straight') {
-      setStatusMessage('Face detected — Please turn head slightly left or right');
-      setLivenessState('turn');
-      return;
-    } 
-    
-    if (livenessState === 'turn') {
-      const jaw = data.landmarks.getJawOutline();
-      const left = jaw[0]?.x;
-      const right = jaw[16]?.x;
-      const nose = data.landmarks.getNose()[3]?.x;
-      
-      if (left === undefined || right === undefined || nose === undefined) return;
-      const width = right - left;
-      if (width <= 0) return;
-      
-      const ratio = (nose - left) / width;
-      
-      // If ratio is off-center, liveness head turn verified
-      if (ratio < 0.4 || ratio > 0.6) {
-        setLivenessState('verifying');
-        setStatusMessage('Verifying identity...');
-        verifyBiometricFace(data.descriptor);
+    async function preloadBiometrics() {
+      try {
+        const profiles = await db.getEnrolledProfiles(accountEmail);
+        if (active) {
+          cachedProfilesRef.current = profiles;
+        }
+      } catch (err) {
+        console.warn("[AURA] Biometric profile cache initialization notice:", err);
       }
     }
-  };
 
-  const verifyBiometricFace = async (descriptor: Float32Array) => {
+    preloadBiometrics();
+
+    return () => {
+      active = false;
+    };
+  }, [accountEmail]);
+
+  // 2. High-speed local biometric verification (Requirements 4, 5, 6, 8, 10, 11)
+  const handleFaceDetected = async (data: { descriptor: Float32Array, landmarks: any, faceDetectedTime?: number }) => {
+    if (isSuccess || isVerifyingRef.current) return;
+    isVerifyingRef.current = true;
+
     try {
-      const liveEmbedding = Array.from(descriptor);
-      if (!liveEmbedding.length || liveEmbedding.length !== 128) {
-        throw new Error('Biometric face capture incomplete. Please reposition.');
+      const liveEmbedding = data.descriptor;
+      const profiles = cachedProfilesRef.current;
+
+      // Filter by email if provided (Requirement 8)
+      const targetEmail = accountEmail.trim().toLowerCase();
+      const candidateProfiles = targetEmail 
+        ? profiles.filter(p => p.email && p.email.toLowerCase() === targetEmail)
+        : profiles;
+
+      if (candidateProfiles.length === 0 && profiles.length > 0 && targetEmail) {
+        // Targeted email not found among enrolled profiles
+        throw new Error(`No Face ID profile enrolled for ${accountEmail}. Sign in with password or clear the email field.`);
       }
 
-      const THRESHOLD = 0.45; // Biometric matching threshold
-
-      // 1. First attempt backend token authentication if server is configured
-      try {
-        const response = await fetch('/api/auth/face-login', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ descriptor: liveEmbedding })
-        });
-
-        if (response.ok) {
-          const result = await response.json();
-          if (result.token) {
-            const userCred = await signInWithCustomToken(auth, result.token);
-            
-            let user: User | null = null;
-            try {
-              const docSnap = await getDoc(doc(firestore, 'users', userCred.user.uid));
-              if (docSnap.exists()) {
-                user = docSnap.data() as User;
-              }
-            } catch {
-              // Permission fallback
-            }
-
-            if (!user) {
-              const cached = localStorage.getItem(`aura_user_${userCred.user.uid}`);
-              if (cached) {
-                try {
-                  user = JSON.parse(cached) as User;
-                } catch {}
-              }
-            }
-
-            if (!user) {
-              user = {
-                id: userCred.user.uid,
-                uid: userCred.user.uid,
-                name: userCred.user.displayName || 'Pavan',
-                email: userCred.user.email || '',
-                faceDescriptor: liveEmbedding
-              };
-            }
-
-            const displayName = user.name || 'Pavan';
-            setVerifiedUserName(displayName);
-            setStatusMessage('Identity confirmed');
-            setIsSuccess(true);
-
-            setTimeout(() => {
-              onLogin(user!);
-            }, 1800);
-            return;
-          }
-        }
-      } catch {
-        // Backend service account offline or in dev fallback mode
-      }
-
-      // 2. Direct Biometric Verification against enrolled profiles
-      const allUsersStr = localStorage.getItem('aura_users_index') || '[]';
-      const allUserIds: string[] = JSON.parse(allUsersStr);
-      let matchedUser: User | null = null;
+      // In-memory comparison (Requirement 6)
+      const compStart = performance.now();
+      let matchedProfile: EnrolledProfile | null = null;
       let minDistance = Infinity;
+      const THRESHOLD = 0.45; // Secure biometric verification threshold
 
-      for (const uid of allUserIds) {
-        const profile = await db.getFaceProfile(uid);
-        if (!profile || !profile.embedding || profile.embedding.length !== 128) {
-          continue;
-        }
+      const searchList = candidateProfiles.length > 0 ? candidateProfiles : profiles;
 
-        const distance = calculateEuclideanDistance(liveEmbedding, profile.embedding);
-
-        if (distance < minDistance && distance < THRESHOLD) {
-          minDistance = distance;
-          
-          const userStr = localStorage.getItem(`aura_user_${uid}`);
-          if (userStr) {
-            try {
-              const u = JSON.parse(userStr);
-              if (accountEmail && u.email && u.email.toLowerCase() !== accountEmail.trim().toLowerCase()) {
-                continue;
-              }
-              matchedUser = {
-                id: u.id || u.uid || uid,
-                uid: u.uid || uid,
-                name: u.name,
-                email: u.email,
-                faceDescriptor: profile.embedding,
-                createdAt: u.createdAt || new Date().toISOString()
-              };
-            } catch {}
-          }
+      for (const profile of searchList) {
+        const dist = calculateEuclideanDistance(liveEmbedding, profile.embedding);
+        if (dist < minDistance && dist < THRESHOLD) {
+          minDistance = dist;
+          matchedProfile = profile;
         }
       }
 
-      if (matchedUser) {
-        const displayName = matchedUser.name || 'Pavan';
-        setVerifiedUserName(displayName);
-        setStatusMessage('Identity confirmed');
-        setIsSuccess(true);
+      const compElapsed = (performance.now() - compStart).toFixed(2);
+      console.log(`[AURA] Face comparison: ${compElapsed} ms`);
 
+      if (matchedProfile) {
+        // Requirement 5: If borderline (e.g. 0.42 to 0.45) but uncertain, optionally capture 1 sample to confirm
+        if (minDistance > 0.42 && uncertainSamplesRef.current < 1) {
+          uncertainSamplesRef.current += 1;
+          isVerifyingRef.current = false;
+          return;
+        }
+
+        const totalStart = data.faceDetectedTime || recognitionStartRef.current;
+        const totalRecognitionTime = (performance.now() - totalStart).toFixed(1);
+        console.log(`[AURA] Total recognition: ${totalRecognitionTime} ms`);
+
+        // Requirement 10: Stop camera after success immediately
+        setIsSuccess(true);
+        setStatusMessage('Identity confirmed');
+        const displayName = matchedProfile.name || 'User';
+        setVerifiedUserName(displayName);
+
+        // Immediate authentication login action
+        const verifiedUser: User = {
+          id: matchedProfile.uid,
+          uid: matchedProfile.uid,
+          name: matchedProfile.name,
+          email: matchedProfile.email,
+          faceDescriptor: matchedProfile.embedding,
+        };
+
+        // Smooth transition into dashboard
         setTimeout(() => {
-          onLogin(matchedUser!);
-        }, 1800);
+          onLogin(verifiedUser);
+        }, 850);
         return;
       }
 
-      throw new Error('Face not recognized. Biometric verification threshold was not satisfied.');
+      // No match in current frame, unlock for next controlled frame check
+      isVerifyingRef.current = false;
     } catch (err: any) {
-      console.warn("Face login verification notice:", err.message);
-      setError(err.message || 'Face not recognized. Please try again.');
+      console.warn("[AURA] Biometric matching notice:", err.message);
+      setError(err.message || 'Face not recognized. Please try again or use password.');
       setStatusMessage('Verification failed');
+      isVerifyingRef.current = false;
     }
   };
 
   const handleRetry = () => {
     setError(null);
     setIsSuccess(false);
-    setLivenessState('straight');
+    uncertainSamplesRef.current = 0;
+    isVerifyingRef.current = false;
+    recognitionStartRef.current = performance.now();
     setStatusMessage('Looking for your face...');
   };
 
   return (
     <AuthLayout 
-      title={isSuccess ? "Identity Confirmed" : "Biometric Face ID"} 
+      title={isSuccess ? "Identity Confirmed" : "Sign in with Face"} 
       subtitle={isSuccess ? "Biometric authentication successful." : "Center your face in the aperture to authenticate."}
     >
       <div className="space-y-4">
         <AnimatePresence mode="wait">
           {error ? (
-            /* Failure State */
+            /* Clean Error State */
             <motion.div 
               key="error-state"
               initial={{ opacity: 0, scale: 0.96 }}
               animate={{ opacity: 1, scale: 1 }}
               exit={{ opacity: 0, scale: 0.96 }}
-              className="text-center py-5 space-y-4"
+              className="text-center py-4 space-y-4"
             >
-              <div className="relative w-14 h-14 rounded-2xl bg-rose-500/10 border border-rose-500/30 flex items-center justify-center mx-auto text-rose-400 shadow-[0_0_25px_rgba(244,63,94,0.25)]">
-                <AlertCircle className="w-7 h-7" />
+              <div className="w-12 h-12 rounded-2xl bg-amber-50 border border-amber-200 flex items-center justify-center mx-auto text-amber-600">
+                <AlertCircle className="w-6 h-6" />
               </div>
               
-              <div className="space-y-1.5">
-                <h3 className="text-base font-semibold text-slate-100">
+              <div className="space-y-1">
+                <h3 className="text-base font-semibold text-[#111318]">
                   Face not recognized
                 </h3>
-                <p className="text-xs text-slate-400 max-w-xs mx-auto leading-relaxed">
-                  Please ensure good lighting and face the camera directly, or authenticate with your account password.
+                <p className="text-xs text-[#626873] max-w-xs mx-auto leading-relaxed">
+                  {error || "Please ensure balanced lighting and face the camera directly, or sign in with your account password."}
                 </p>
               </div>
 
-              <div className="flex flex-col sm:flex-row gap-3 justify-center pt-2">
+              <div className="flex flex-col sm:flex-row gap-2.5 justify-center pt-2">
                 <Button 
                   type="button"
                   variant="primary" 
@@ -245,68 +194,67 @@ export function FaceLogin({ onLogin, onNavigate }: FaceLoginProps) {
               </div>
             </motion.div>
           ) : isSuccess ? (
-            /* Success State */
+            /* Clean Identity Confirmed Success State */
             <motion.div 
               key="success-state"
-              initial={{ opacity: 0, scale: 0.95 }}
+              initial={{ opacity: 0, scale: 0.96 }}
               animate={{ opacity: 1, scale: 1 }}
-              transition={{ duration: 0.45, ease: [0.16, 1, 0.3, 1] }}
-              className="text-center py-8 space-y-5"
+              transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
+              className="text-center py-7 space-y-4"
             >
-              <div className="relative w-18 h-18 rounded-full bg-gradient-to-tr from-cyan-500/20 via-emerald-500/20 to-indigo-500/20 border border-cyan-400/50 flex items-center justify-center mx-auto shadow-[0_0_35px_rgba(34,211,238,0.4)]">
-                <CheckCircle2 className="w-9 h-9 text-cyan-300 animate-in zoom-in-50 duration-300" />
-                <div className="absolute inset-0 rounded-full border border-cyan-400 animate-ping opacity-30" />
+              <div className="w-14 h-14 rounded-full bg-emerald-50 border border-emerald-200 flex items-center justify-center mx-auto text-emerald-600">
+                <CheckCircle2 className="w-8 h-8" />
               </div>
 
-              <div className="space-y-1.5">
-                <h3 className="text-xl font-bold tracking-tight text-white flex items-center justify-center gap-2">
-                  <span>Welcome back{verifiedUserName ? `, ${verifiedUserName}.` : '.'}</span>
-                  <Sparkles className="w-4 h-4 text-cyan-400" />
+              <div className="space-y-1">
+                <h3 className="text-xl font-semibold tracking-tight text-[#111318]">
+                  Welcome back{verifiedUserName ? `, ${verifiedUserName}.` : '.'}
                 </h3>
-                <p className="text-xs font-mono text-cyan-300/80 tracking-wide uppercase">
-                  Biometric Token Minted • Session Authorizing
+                <p className="text-xs text-[#626873] tracking-wide">
+                  Identity confirmed • Session authorized
                 </p>
               </div>
 
-              <div className="w-48 h-1 mx-auto bg-slate-800 rounded-full overflow-hidden">
-                <div className="w-full h-full bg-gradient-to-r from-cyan-400 to-indigo-500 animate-pulse" />
+              <div className="w-36 h-1 mx-auto bg-slate-100 rounded-full overflow-hidden">
+                <div className="w-full h-full bg-[#17191D] animate-pulse" />
               </div>
             </motion.div>
           ) : (
-            /* Active Scanner State */
+            /* Minimalist Fast Biometric Scanner State */
             <motion.div 
               key="active-scanner"
               initial={{ opacity: 0 }}
               animate={{ opacity: 1 }}
               exit={{ opacity: 0 }}
-              className="space-y-3.5"
+              className="space-y-4"
             >
-              {/* Account Email (Optional selector) */}
+              {/* Optional Account Email Locator (Requirement 8) */}
               <div className="max-w-[280px] mx-auto w-full">
                 <Input
                   id="face-email-hint"
-                  label="Account Email (Optional filter)"
+                  label="Account email (Optional)"
                   placeholder="name@company.com"
                   type="email"
                   value={accountEmail}
                   onChange={(e) => setAccountEmail(e.target.value)}
-                  className="h-8 text-xs"
+                  className="h-9 text-xs"
                 />
               </div>
 
-              {/* 2026 Biometric Camera Scanner View */}
+              {/* Fast Biometric Viewfinder */}
               <CameraView 
                 onFaceDetected={handleFaceDetected} 
                 statusMessage={statusMessage}
-                isScanning={livenessState !== 'verifying'}
+                isScanning={!isSuccess}
+                isSuccess={isSuccess}
               />
 
-              {/* Return to Password Link */}
+              {/* Return to Password Sign In */}
               <div className="flex justify-center pt-1">
                 <button 
                   type="button" 
                   onClick={() => onNavigate('login')}
-                  className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-400 hover:text-slate-200 transition-colors focus:outline-none"
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-[#626873] hover:text-[#111318] transition-colors focus:outline-none"
                 >
                   <ArrowLeft className="w-3.5 h-3.5" />
                   <span>Return to password sign in</span>

@@ -59,35 +59,35 @@ export function ForgotPasswordModal({ isOpen, onClose, defaultEmail = '' }: Forg
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             onClick={onClose}
-            className="absolute inset-0 bg-black/70 backdrop-blur-md"
+            className="absolute inset-0 bg-slate-900/30 backdrop-blur-xs"
           />
 
           {/* Dialog Card */}
           <motion.div
-            initial={{ opacity: 0, scale: 0.95, y: 15 }}
+            initial={{ opacity: 0, scale: 0.96, y: 10 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
-            exit={{ opacity: 0, scale: 0.95, y: 15 }}
-            transition={{ duration: 0.25, ease: [0.16, 1, 0.3, 1] }}
-            className="relative w-full max-w-md rounded-2xl bg-[#0e1222] border border-white/10 p-6 sm:p-7 shadow-[0_25px_50px_-12px_rgba(0,0,0,0.8)] z-10 text-left"
+            exit={{ opacity: 0, scale: 0.96, y: 10 }}
+            transition={{ duration: 0.2, ease: [0.16, 1, 0.3, 1] }}
+            className="relative w-full max-w-md rounded-2xl bg-white border border-[#E5E7EB] p-6 sm:p-7 shadow-[0_16px_36px_-8px_rgba(17,19,24,0.12)] z-10 text-left text-[#111318]"
           >
             {/* Close Button */}
             <button
               onClick={onClose}
               aria-label="Close dialog"
-              className="absolute top-4 right-4 p-1 rounded-lg text-slate-400 hover:text-slate-200 hover:bg-white/5 transition-colors"
+              className="absolute top-4 right-4 p-1 rounded-lg text-[#8E95A2] hover:text-[#111318] hover:bg-slate-100 transition-colors"
             >
               <X className="w-4 h-4" />
             </button>
 
             {isSuccess ? (
               <div className="text-center py-4 space-y-4">
-                <div className="w-12 h-12 rounded-full bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center mx-auto text-emerald-400">
+                <div className="w-12 h-12 rounded-full bg-emerald-50 border border-emerald-200 flex items-center justify-center mx-auto text-emerald-600">
                   <CheckCircle2 className="w-6 h-6" />
                 </div>
                 <div className="space-y-1">
-                  <h3 className="text-base font-semibold text-slate-100">Reset instructions dispatched</h3>
-                  <p className="text-xs text-slate-400 max-w-xs mx-auto leading-relaxed">
-                    Check <span className="text-indigo-300 font-mono font-medium">{email}</span> for a secure password reset link.
+                  <h3 className="text-base font-semibold text-[#111318]">Reset link sent</h3>
+                  <p className="text-xs text-[#626873] max-w-xs mx-auto leading-relaxed">
+                    Check <span className="text-[#111318] font-medium">{email}</span> for a secure password recovery link.
                   </p>
                 </div>
                 <Button variant="secondary" className="w-full mt-4" onClick={onClose}>
@@ -97,10 +97,10 @@ export function ForgotPasswordModal({ isOpen, onClose, defaultEmail = '' }: Forg
             ) : (
               <form onSubmit={handleSubmit} className="space-y-4">
                 <div className="space-y-1">
-                  <h3 className="text-base font-semibold tracking-tight text-slate-100">
+                  <h3 className="text-base font-semibold tracking-tight text-[#111318]">
                     Reset Account Password
                   </h3>
-                  <p className="text-xs text-slate-400 leading-relaxed">
+                  <p className="text-xs text-[#626873] leading-relaxed">
                     Enter the email registered with your AURA identity to receive a secure recovery key.
                   </p>
                 </div>
@@ -112,11 +112,11 @@ export function ForgotPasswordModal({ isOpen, onClose, defaultEmail = '' }: Forg
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
                   placeholder="name@company.com"
-                  startIcon={<Mail className="w-4 h-4 text-slate-400" />}
+                  startIcon={<Mail className="w-4 h-4 text-[#8E95A2]" />}
                 />
 
                 {error && (
-                  <div className="flex items-center gap-2 p-2.5 rounded-lg bg-rose-500/10 border border-rose-500/20 text-rose-400 text-xs">
+                  <div className="flex items-center gap-2 p-2.5 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 text-xs">
                     <AlertCircle className="w-4 h-4 shrink-0" />
                     <span>{error}</span>
                   </div>

@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { Login } from './views/Login';
 import { Register } from './views/Register';
@@ -12,12 +12,21 @@ import { Dashboard } from './views/Dashboard';
 import { User } from './types';
 import { auth } from './lib/firebase';
 import { signOut } from 'firebase/auth';
+import { loadFaceModels } from './lib/face';
 
 export type View = 'login' | 'register' | 'face-login' | 'dashboard';
 
 export default function App() {
   const [view, setView] = useState<View>('login');
   const [user, setUser] = useState<User | null>(null);
+  const [faceLoginEmail, setFaceLoginEmail] = useState('');
+
+  // 1. Preload Face recognition models early in the app lifecycle (Requirement 1)
+  useEffect(() => {
+    loadFaceModels().catch((err) => {
+      console.warn("[AURA] Global model preloading notice:", err);
+    });
+  }, []);
 
   const handleLogin = (user: User) => {
     setUser(user);
@@ -31,7 +40,15 @@ export default function App() {
       console.error("Error signing out:", error);
     }
     setUser(null);
+    setFaceLoginEmail('');
     setView('login');
+  };
+
+  const handleNavigateToAuth = (targetView: 'register' | 'face-login', email?: string) => {
+    if (email !== undefined) {
+      setFaceLoginEmail(email);
+    }
+    setView(targetView);
   };
 
   return (
@@ -65,7 +82,14 @@ export default function App() {
             exit={{ opacity: 0, scale: 0.98 }}
             transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
           >
-            <FaceLogin onLogin={handleLogin} onNavigate={setView} />
+            <FaceLogin 
+              onLogin={handleLogin} 
+              onNavigate={(v) => {
+                setFaceLoginEmail('');
+                setView(v);
+              }} 
+              initialEmail={faceLoginEmail}
+            />
           </motion.div>
         ) : (
           <motion.div 
@@ -75,7 +99,7 @@ export default function App() {
             exit={{ opacity: 0, scale: 0.98 }}
             transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
           >
-            <Login onLogin={handleLogin} onNavigate={setView} />
+            <Login onLogin={handleLogin} onNavigate={handleNavigateToAuth} />
           </motion.div>
         )}
       </AnimatePresence>

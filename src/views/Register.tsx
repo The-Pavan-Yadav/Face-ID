@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { User as UserIcon, Mail, Lock, Sparkles } from 'lucide-react';
+import { User as UserIcon, Mail, Lock } from 'lucide-react';
 import { AuthLayout } from '../components/AuthLayout';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
@@ -80,7 +80,7 @@ export function Register({ onSuccess, onNavigate }: RegisterProps) {
       title="Create account" 
       subtitle="Establish your secure AURA biometric identity"
     >
-      <form onSubmit={handleDetailsSubmit} className="space-y-2.5">
+      <form onSubmit={handleDetailsSubmit} className="space-y-3">
         <Input 
           id="reg-name"
           label="Full name"
@@ -129,13 +129,13 @@ export function Register({ onSuccess, onNavigate }: RegisterProps) {
         />
 
         {error && (
-          <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/25 text-rose-300 text-xs flex items-start gap-2 text-left leading-relaxed">
-            <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-rose-400 mt-1.5" />
+          <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-start gap-2 text-left leading-relaxed">
+            <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-rose-600 mt-1.5" />
             <span>{error}</span>
           </div>
         )}
 
-        <div className="pt-1.5">
+        <div className="pt-2">
           {needsSignIn ? (
             <Button 
               type="button" 
@@ -148,7 +148,7 @@ export function Register({ onSuccess, onNavigate }: RegisterProps) {
           ) : (
             <Button 
               type="submit" 
-              className="w-full font-semibold" 
+              className="w-full font-medium" 
               isLoading={isLoading}
               loadingText="Creating account..."
             >
@@ -157,12 +157,12 @@ export function Register({ onSuccess, onNavigate }: RegisterProps) {
           )}
         </div>
 
-        <p className="pt-1.5 text-center text-xs text-slate-400">
-          Already registered?{' '}
+        <p className="pt-2 text-center text-xs text-[#626873]">
+          Already have an account?{' '}
           <button 
             type="button" 
             onClick={() => onNavigate('login')}
-            className="font-medium text-slate-200 hover:text-indigo-300 transition-colors focus:outline-none focus-visible:underline"
+            className="font-semibold text-[#111318] hover:underline transition-colors focus:outline-none"
           >
             Sign in
           </button>

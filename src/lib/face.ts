@@ -2,33 +2,155 @@ import * as faceapi from '@vladmandic/face-api';
 
 const MODEL_URL = 'https://cdn.jsdelivr.net/npm/@vladmandic/face-api/model/';
 
+// Singleton shared initialization promise (Requirement 9)
+let faceModelPromise: Promise<void> | null = null;
 let modelsLoaded = false;
+const modelReadyListeners: Array<() => void> = [];
 
-export async function loadFaceModels() {
-  if (modelsLoaded) return;
-  try {
-    await Promise.all([
-      faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
-      faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
-      faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
-    ]);
-    modelsLoaded = true;
-  } catch (error) {
-    console.error("Failed to load face-api models:", error);
-    throw new Error("Could not initialize face recognition engine.");
+export function isFaceModelLoaded(): boolean {
+  return modelsLoaded;
+}
+
+export function addModelReadyListener(listener: () => void): () => void {
+  if (modelsLoaded) {
+    listener();
+    return () => {};
   }
+  modelReadyListeners.push(listener);
+  return () => {
+    const idx = modelReadyListeners.indexOf(listener);
+    if (idx !== -1) modelReadyListeners.splice(idx, 1);
+  };
+}
+
+export function loadFaceModels(): Promise<void> {
+  if (modelsLoaded) {
+    return Promise.resolve();
+  }
+
+  if (!faceModelPromise) {
+    const modelStart = performance.now();
+    faceModelPromise = (async () => {
+      try {
+        await Promise.all([
+          faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+          faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+          faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL),
+        ]);
+        modelsLoaded = true;
+        const elapsed = (performance.now() - modelStart).toFixed(1);
+        console.log(`[AURA] Model ready: ${elapsed} ms`);
+        
+        // Notify all subscribers
+        modelReadyListeners.forEach(fn => {
+          try { fn(); } catch (err) { console.error(err); }
+        });
+        modelReadyListeners.length = 0;
+      } catch (error) {
+        faceModelPromise = null;
+        console.error("Failed to load face-api models:", error);
+        throw new Error("Could not initialize face recognition engine.");
+      }
+    })();
+  }
+
+  return faceModelPromise;
+}
+
+export interface QualityFaceDetection {
+  status: 'no_face' | 'multiple_faces' | 'poor_quality' | 'high_quality';
+  message: string;
+  descriptor?: Float32Array;
+  landmarks?: any;
+  box?: { x: number; y: number; width: number; height: number };
+}
+
+/**
+ * Fast face detection pipeline (Requirements 4 & 5):
+ * 1. Quickly check if exactly one face is present using TinyFaceDetector.
+ * 2. Validate centering, size, and image quality.
+ * 3. Only generate expensive embedding when a clear, usable face is verified.
+ */
+export async function detectQualityFaceAndEmbedding(video: HTMLVideoElement): Promise<QualityFaceDetection> {
+  const frameStart = performance.now();
+  await loadFaceModels();
+
+  const options = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.55 });
+  const detections = await faceapi.detectAllFaces(video, options);
+
+  if (!detections || detections.length === 0) {
+    return { status: 'no_face', message: 'Looking for your face...' };
+  }
+
+  if (detections.length > 1) {
+    return { status: 'multiple_faces', message: 'Multiple faces detected' };
+  }
+
+  const primary = detections[0];
+  const box = primary.box;
+  const videoW = video.videoWidth || 640;
+  const videoH = video.videoHeight || 480;
+
+  // Face size check: ensure face occupies sufficient area
+  if (box.width < 70 || box.height < 70) {
+    return { status: 'poor_quality', message: 'Move slightly closer' };
+  }
+
+  // Centering check: center of face within reasonable viewing bounds
+  const centerX = box.x + box.width / 2;
+  const centerY = box.y + box.height / 2;
+  const normX = centerX / videoW;
+  const normY = centerY / videoH;
+
+  if (normX < 0.20 || normX > 0.80 || normY < 0.15 || normY > 0.85) {
+    return { status: 'poor_quality', message: 'Center your face' };
+  }
+
+  if (primary.score < 0.60) {
+    return { status: 'poor_quality', message: 'Ensure good lighting' };
+  }
+
+  // Exactly one well-centered, high-quality face detected!
+  const faceDetectedTime = (performance.now() - frameStart).toFixed(1);
+  console.log(`[AURA] Face detected: ${faceDetectedTime} ms`);
+
+  // Compute landmarks and 128-dimensional embedding
+  const embedStart = performance.now();
+  const faceWithDescriptor = await faceapi
+    .detectSingleFace(video, options)
+    .withFaceLandmarks()
+    .withFaceDescriptor();
+
+  if (!faceWithDescriptor || !faceWithDescriptor.descriptor) {
+    return { status: 'poor_quality', message: 'Repositioning...' };
+  }
+
+  const embedTime = (performance.now() - embedStart).toFixed(1);
+  console.log(`[AURA] Embedding generated: ${embedTime} ms`);
+
+  return {
+    status: 'high_quality',
+    message: 'Face detected',
+    descriptor: faceWithDescriptor.descriptor,
+    landmarks: faceWithDescriptor.landmarks,
+    box: {
+      x: box.x,
+      y: box.y,
+      width: box.width,
+      height: box.height
+    }
+  };
 }
 
 export async function getFaceData(video: HTMLVideoElement) {
-  const detection = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 }))
-    .withFaceLandmarks()
-    .withFaceDescriptor();
-  
-  if (!detection) return null;
-  return {
-    descriptor: detection.descriptor,
-    landmarks: detection.landmarks
-  };
+  const result = await detectQualityFaceAndEmbedding(video);
+  if (result.status === 'high_quality' && result.descriptor) {
+    return {
+      descriptor: result.descriptor,
+      landmarks: result.landmarks
+    };
+  }
+  return null;
 }
 
 export interface FacePoseAnalysis {
@@ -42,7 +164,7 @@ export interface FacePoseAnalysis {
 }
 
 export function analyzeFacePose(landmarks: any): FacePoseAnalysis {
-  const positions = landmarks.positions;
+  const positions = landmarks?.positions;
   if (!positions || positions.length < 68) {
     return {
       yawRatio: 0.5,
@@ -55,23 +177,19 @@ export function analyzeFacePose(landmarks: any): FacePoseAnalysis {
     };
   }
 
-  // Jaw points (0 to 16)
   const jawLeft = positions[0].x;
   const jawRight = positions[16].x;
   const minJawX = Math.min(jawLeft, jawRight);
   const maxJawX = Math.max(jawLeft, jawRight);
   const jawWidth = Math.max(maxJawX - minJawX, 1);
 
-  // Nose bridge / tip
-  const noseX = positions[30].x; // Mid nose bridge / tip
+  const noseX = positions[30].x;
   const yawRatio = (noseX - minJawX) / jawWidth;
 
-  // Eye centers
   const leftEyeY = (positions[36].y + positions[39].y) / 2;
   const rightEyeY = (positions[42].y + positions[45].y) / 2;
   const eyeMidY = (leftEyeY + rightEyeY) / 2;
 
-  // Nose tip and chin
   const noseTipY = positions[33].y;
   const chinY = positions[8].y;
 
@@ -79,16 +197,10 @@ export function analyzeFacePose(landmarks: any): FacePoseAnalysis {
   const lowerFace = Math.max(chinY - noseTipY, 1);
   const pitchRatio = upperFace / lowerFace;
 
-  // Note: in a mirrored video feed, user turning to their left makes their nose shift towards higher X (right in video)
-  // or towards lower X depending on hardware.
-  // Standard user left turn in mirrored view: nose moves towards right edge of camera (ratio > 0.58).
-  // Standard user right turn in mirrored view: nose moves towards left edge of camera (ratio < 0.42).
   const isTurnLeft = yawRatio > 0.58;
   const isTurnRight = yawRatio < 0.42;
   const isStraightYaw = yawRatio >= 0.44 && yawRatio <= 0.56;
 
-  // Pitch: looking up compresses upper face (nose closer to eyes), pitchRatio drops (< 0.75).
-  // Looking down expands upper face relative to chin, pitchRatio increases (> 1.25).
   const isLookUp = pitchRatio < 0.72;
   const isLookDown = pitchRatio > 1.28;
   const isStraightPitch = pitchRatio >= 0.78 && pitchRatio <= 1.22;
@@ -194,19 +306,16 @@ export function createFaceTemplate(samples: Float32Array[]): number[] {
   const length = 128;
   const combined = new Float64Array(length);
 
-  // Element-wise sum across all valid samples
   for (const sample of validSamples) {
     for (let i = 0; i < length; i++) {
       combined[i] += sample[i];
     }
   }
 
-  // Element-wise average
   for (let i = 0; i < length; i++) {
     combined[i] /= validSamples.length;
   }
 
-  // L2 Normalize to maintain 128-dimensional unit hypersphere properties
   let norm = 0;
   for (let i = 0; i < length; i++) {
     norm += combined[i] * combined[i];
@@ -218,6 +327,5 @@ export function createFaceTemplate(samples: Float32Array[]): number[] {
     normalized[i] = Number((combined[i] / norm).toFixed(6));
   }
 
-  console.log("Face descriptor generated");
   return normalized;
 }

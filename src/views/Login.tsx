@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Mail, Lock } from 'lucide-react';
 import { motion } from 'motion/react';
 import { AuthLayout } from '../components/AuthLayout';
@@ -8,10 +8,11 @@ import { BiometricHeroButton } from '../components/BiometricHeroButton';
 import { ForgotPasswordModal } from '../components/ForgotPasswordModal';
 import { db } from '../lib/db';
 import { User } from '../types';
+import { loadFaceModels, isFaceModelLoaded, addModelReadyListener } from '../lib/face';
 
 interface LoginProps {
   onLogin: (user: User) => void;
-  onNavigate: (view: 'register' | 'face-login') => void;
+  onNavigate: (view: 'register' | 'face-login', email?: string) => void;
 }
 
 export function Login({ onLogin, onNavigate }: LoginProps) {
@@ -20,6 +21,25 @@ export function Login({ onLogin, onNavigate }: LoginProps) {
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isForgotModalOpen, setIsForgotModalOpen] = useState(false);
+  const [isModelReady, setIsModelReady] = useState(isFaceModelLoaded());
+
+  // 1. Preload the face recognition model early while sign-in page is loading (Requirement 1)
+  useEffect(() => {
+    if (isFaceModelLoaded()) {
+      setIsModelReady(true);
+      return;
+    }
+
+    const unsubscribe = addModelReadyListener(() => {
+      setIsModelReady(true);
+    });
+
+    loadFaceModels().catch((err) => {
+      console.warn("[AURA] Preload model notice:", err);
+    });
+
+    return unsubscribe;
+  }, []);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -38,7 +58,7 @@ export function Login({ onLogin, onNavigate }: LoginProps) {
       } else if (err.code === 'auth/user-not-found') {
         setError('No account found with this email. Please create an account.');
       } else if (err.code === 'auth/too-many-requests') {
-        setError('Access temporarily disabled due to many failed attempts. Try again later or reset password.');
+        setError('Access temporarily disabled due to multiple failed attempts. Try again later.');
       } else {
         setError(err.message || 'Authentication failed. Please check your network.');
       }
@@ -47,8 +67,9 @@ export function Login({ onLogin, onNavigate }: LoginProps) {
     }
   };
 
+  // 2. Pass entered email to locate the corresponding account directly (Requirement 8)
   const handleFaceIdClick = () => {
-    onNavigate('face-login');
+    onNavigate('face-login', email.trim());
   };
 
   return (
@@ -56,7 +77,7 @@ export function Login({ onLogin, onNavigate }: LoginProps) {
       title="Welcome back." 
       subtitle="Authenticate securely with AURA."
     >
-      <form onSubmit={handleSubmit} className="space-y-3.5">
+      <form onSubmit={handleSubmit} className="space-y-4">
         {/* Email Address */}
         <Input 
           id="login-email"
@@ -88,7 +109,7 @@ export function Login({ onLogin, onNavigate }: LoginProps) {
             <button 
               type="button" 
               onClick={() => setIsForgotModalOpen(true)}
-              className="text-xs text-slate-400 hover:text-indigo-300 font-medium transition-colors duration-200 focus:outline-none focus-visible:underline"
+              className="text-xs text-[#626873] hover:text-[#111318] font-medium transition-colors duration-150 focus:outline-none focus-visible:underline"
             >
               Forgot password?
             </button>
@@ -100,18 +121,18 @@ export function Login({ onLogin, onNavigate }: LoginProps) {
           <motion.div 
             initial={{ opacity: 0, y: -4 }}
             animate={{ opacity: 1, y: 0 }}
-            className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/25 text-rose-300 text-xs flex items-start gap-2 text-left leading-relaxed"
+            className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs flex items-start gap-2 text-left leading-relaxed"
           >
-            <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-rose-400 mt-1.5" />
+            <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-rose-600 mt-1.5" />
             <span>{error}</span>
           </motion.div>
         )}
 
-        {/* Primary Sign-in Button */}
-        <div className="pt-0.5">
+        {/* Primary Charcoal Sign-in Button */}
+        <div className="pt-1">
           <Button 
             type="submit" 
-            className="w-full text-sm font-semibold tracking-wide" 
+            className="w-full text-sm font-medium tracking-tight" 
             isLoading={isLoading}
             loadingText="Authenticating..."
           >
@@ -119,31 +140,32 @@ export function Login({ onLogin, onNavigate }: LoginProps) {
           </Button>
         </div>
 
-        {/* Technical Divider */}
-        <div className="relative my-3.5">
+        {/* Minimal Divider */}
+        <div className="relative my-4">
           <div className="absolute inset-0 flex items-center">
-            <div className="w-full border-t border-white/[0.08]" />
+            <div className="w-full border-t border-[#E4E6EA]" />
           </div>
-          <div className="relative flex justify-center text-[10px] uppercase tracking-[0.25em]">
-            <span className="bg-[#0c0f1d] px-3 text-slate-400 font-mono">OR CONTINUE WITH</span>
+          <div className="relative flex justify-center text-[11px] font-medium">
+            <span className="bg-white px-3 text-[#8E95A2]">or</span>
           </div>
         </div>
 
-        {/* HERO FEATURE: Biometric Face ID Button */}
-        <div className="pt-0.5">
+        {/* HERO FEATURE: Biometric Face ID Button with early model preload indicator */}
+        <div>
           <BiometricHeroButton 
             onClick={handleFaceIdClick}
             disabled={isLoading}
+            isModelReady={isModelReady}
           />
         </div>
 
         {/* Registration Link */}
-        <p className="pt-2 text-center text-xs text-slate-400">
+        <p className="pt-2 text-center text-xs text-[#626873]">
           Don't have an account?{' '}
           <button 
             type="button" 
             onClick={() => onNavigate('register')}
-            className="font-medium text-slate-200 hover:text-indigo-300 transition-colors focus:outline-none focus-visible:underline"
+            className="font-semibold text-[#111318] hover:underline transition-colors focus:outline-none"
           >
             Create account
           </button>

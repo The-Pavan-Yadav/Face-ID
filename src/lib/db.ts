@@ -10,6 +10,14 @@ export interface SaveFaceProfileParams {
   sampleCount: number;
 }
 
+export interface EnrolledProfile {
+  uid: string;
+  name: string;
+  email: string;
+  embedding: number[];
+  sampleCount: number;
+}
+
 export const db = {
   async createAuthAccount(email: string, password?: string): Promise<string> {
     if (!password) {
@@ -157,6 +165,75 @@ export const db = {
       } catch {}
     }
     return null;
+  },
+
+  async getEnrolledProfiles(emailFilter?: string): Promise<EnrolledProfile[]> {
+    const normalizedEmail = emailFilter?.trim().toLowerCase();
+    const profiles: EnrolledProfile[] = [];
+
+    // 1. Read from local storage index (fast in-memory cache, zero network overhead)
+    try {
+      const indexStr = localStorage.getItem('aura_users_index') || '[]';
+      const userIndex: string[] = JSON.parse(indexStr);
+
+      for (const uid of userIndex) {
+        const cached = localStorage.getItem(`aura_user_${uid}`);
+        if (cached) {
+          try {
+            const parsed = JSON.parse(cached);
+            const emb = parsed.faceDescriptor || parsed.faceProfile?.embedding || parsed.faceProfile?.faceEmbedding;
+            if (emb && Array.isArray(emb) && emb.length === 128) {
+              const prof: EnrolledProfile = {
+                uid: parsed.uid || uid,
+                name: parsed.name || 'User',
+                email: parsed.email || '',
+                embedding: Array.from(emb),
+                sampleCount: parsed.sampleCount || parsed.faceProfile?.sampleCount || 1,
+              };
+
+              if (normalizedEmail) {
+                if (prof.email.toLowerCase() === normalizedEmail) {
+                  return [prof]; // Exact targeted account matched
+                }
+              } else {
+                profiles.push(prof);
+              }
+            }
+          } catch {}
+        }
+      }
+    } catch (e) {
+      console.warn("[AURA] Local biometric cache read notice:", e);
+    }
+
+    // 2. Also check direct localStorage keys in case index was bypassed
+    if (profiles.length === 0 && !normalizedEmail) {
+      try {
+        for (let i = 0; i < localStorage.length; i++) {
+          const key = localStorage.key(i);
+          if (key && key.startsWith('aura_user_')) {
+            const raw = localStorage.getItem(key);
+            if (raw) {
+              try {
+                const parsed = JSON.parse(raw);
+                const emb = parsed.faceDescriptor || parsed.faceProfile?.embedding;
+                if (emb && Array.isArray(emb) && emb.length === 128) {
+                  profiles.push({
+                    uid: parsed.uid || key.replace('aura_user_', ''),
+                    name: parsed.name || 'User',
+                    email: parsed.email || '',
+                    embedding: Array.from(emb),
+                    sampleCount: parsed.sampleCount || 1
+                  });
+                }
+              } catch {}
+            }
+          }
+        }
+      } catch {}
+    }
+
+    return profiles;
   },
 
   async saveUserProfile(uid: string, data: { name: string, email: string, faceDescriptor: number[] }): Promise<void> {

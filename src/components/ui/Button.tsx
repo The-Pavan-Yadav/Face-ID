@@ -2,7 +2,7 @@ import React from 'react';
 import { cn } from '../../lib/utils';
 
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
-  variant?: 'primary' | 'secondary' | 'outline' | 'ghost' | 'glow';
+  variant?: 'primary' | 'secondary' | 'outline' | 'ghost';
   isLoading?: boolean;
   loadingText?: string;
 }
@@ -22,30 +22,26 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
         ref={ref}
         disabled={disabled || isLoading}
         className={cn(
-          "relative inline-flex items-center justify-center font-medium rounded-xl text-sm transition-all duration-200 select-none",
+          "relative inline-flex items-center justify-center font-medium rounded-xl text-sm select-none transition-all duration-150",
           "h-11 px-5 py-2.5",
-          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-indigo-500/50 focus-visible:ring-offset-2 focus-visible:ring-offset-[#080a12]",
+          "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#17191D]/30 focus-visible:ring-offset-2",
           "disabled:pointer-events-none disabled:opacity-50",
           {
-            // Primary 2026 Gradient
-            'bg-gradient-to-r from-indigo-600 via-violet-600 to-indigo-600 text-white shadow-[0_4px_20px_rgba(99,102,241,0.28)] hover:shadow-[0_6px_28px_rgba(99,102,241,0.45)] hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98] border border-indigo-400/20':
+            // Primary Solid Charcoal (Apple / Linear / Stripe high-end SaaS)
+            'bg-[#17191D] hover:bg-[#25282E] text-white shadow-[0_2px_6px_rgba(23,25,29,0.12)] hover:shadow-[0_4px_12px_rgba(23,25,29,0.16)] hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.98]':
               variant === 'primary',
             
-            // Secondary Dark Glass
-            'bg-white/[0.05] hover:bg-white/[0.09] text-slate-200 border border-white/[0.08] hover:border-white/[0.15] active:scale-[0.98]':
+            // Secondary Clean Light
+            'bg-white hover:bg-slate-50 text-[#111318] border border-[#E4E6EA] hover:border-[#D0D4DC] shadow-sm active:scale-[0.98]':
               variant === 'secondary',
             
             // Subtle Outline
-            'border border-white/10 hover:border-indigo-500/40 bg-transparent hover:bg-indigo-950/20 text-slate-300 hover:text-white active:scale-[0.98]':
+            'border border-[#E4E6EA] hover:border-slate-400 bg-transparent hover:bg-slate-50 text-[#111318] active:scale-[0.98]':
               variant === 'outline',
             
             // Ghost
-            'hover:bg-white/[0.06] text-slate-400 hover:text-slate-100':
+            'hover:bg-slate-100 text-[#626873] hover:text-[#111318]':
               variant === 'ghost',
-
-            // Glow
-            'bg-indigo-950/50 border border-indigo-500/40 text-indigo-200 shadow-[0_0_20px_rgba(99,102,241,0.2)] hover:shadow-[0_0_25px_rgba(99,102,241,0.35)] hover:border-indigo-400':
-              variant === 'glow',
           },
           className
         )}
@@ -59,9 +55,9 @@ export const Button = React.forwardRef<HTMLButtonElement, ButtonProps>(
               fill="none" 
               viewBox="0 0 24 24"
             >
-              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="3" />
               <path 
-                className="opacity-75" 
+                className="opacity-90" 
                 fill="currentColor" 
                 d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" 
               />
