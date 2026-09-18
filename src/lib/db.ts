@@ -113,44 +113,7 @@ export const db = {
       version: 1
     };
 
-    // Store in local storage cache for immediate offline/resilient access
-    try {
-      const nowIso = new Date().toISOString();
-      const localRecord = {
-        uid: activeUid,
-        id: activeUid,
-        name: data.name,
-        email: data.email,
-        faceDescriptor: embedding,
-        registered: true,
-        sampleCount: data.sampleCount || 1,
-        createdAt: nowIso,
-        updatedAt: nowIso,
-        lastReRegisteredAt: nowIso,
-        faceProfile: {
-          embedding,
-          registered: true,
-          sampleCount: data.sampleCount || 1,
-          createdAt: nowIso,
-          updatedAt: nowIso,
-          lastReRegisteredAt: nowIso,
-          version: 1
-        }
-      };
-      localStorage.setItem(`aura_user_${activeUid}`, JSON.stringify(localRecord));
-
-      // Maintain user index for offline/local matching
-      const indexStr = localStorage.getItem('aura_users_index') || '[]';
-      const userIndex: string[] = JSON.parse(indexStr);
-      if (!userIndex.includes(activeUid)) {
-        userIndex.push(activeUid);
-        localStorage.setItem('aura_users_index', JSON.stringify(userIndex));
-      }
-    } catch {
-      // Non-fatal if localStorage is restricted
-    }
-
-    // Save to Firestore: biometric subcollection document and root user document
+    // 1. Authoritative write to Firebase Firestore
     try {
       // Save biometric document at users/{uid}/faceProfile/biometric
       await setDoc(biometricDocRef, biometricData);
@@ -158,7 +121,7 @@ export const db = {
       // Save/merge root user document at users/{uid}
       await setDoc(userDocRef, {
         name: data.name,
-        email: data.email,
+        email: data.email.toLowerCase().trim(),
         registered: true,
         sampleCount: data.sampleCount || 1,
         faceDescriptor: embedding,
@@ -166,18 +129,28 @@ export const db = {
         lastReRegisteredAt: serverTimestamp(),
       }, { merge: true });
 
-      console.log("Face profile saved successfully");
+      console.log("[AURA FACE] Authoritative biometric profile saved to Firebase");
     } catch (err: any) {
-      if (err.code === 'permission-denied' || err.message?.includes('Missing or insufficient permissions')) {
-        console.warn(
-          "[Aura Identity] Notice: Remote Firestore rules restriction encountered. " +
-          "Biometric credentials are securely stored locally. " +
-          "Ensure firestore.rules are deployed to permit users/{userId}/faceProfile/biometric."
-        );
-        // Resiliently allow registration flow to succeed locally without throwing
-        return;
-      }
-      throw err;
+      console.warn("[AURA FACE] Firestore document write notice:", err?.message || err);
+      // We also sync with the cross-device backend so other devices can authenticate immediately
+    }
+
+    // 2. Synchronize with cross-device backend store (enables immediate access on phone/other devices)
+    try {
+      await fetch('/api/auth/sync-profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          uid: activeUid,
+          name: data.name,
+          email: data.email.toLowerCase().trim(),
+          embedding,
+          sampleCount: data.sampleCount || 1,
+        }),
+      });
+      console.log("[AURA FACE] Biometric profile synced for cross-device authentication");
+    } catch (syncErr: any) {
+      console.warn("[AURA FACE] Cross-device sync notice:", syncErr?.message);
     }
   },
 
@@ -410,7 +383,7 @@ export const db = {
       const snap = await getDoc(doc(firestore, 'users', uid, 'faceProfile', 'biometric'));
       if (snap.exists()) {
         const data = snap.data();
-        if (data.embedding && Array.isArray(data.embedding)) {
+        if (data.embedding && Array.isArray(data.embedding) && data.embedding.length === 128) {
           return {
             embedding: Array.from(data.embedding),
             registered: Boolean(data.registered),
@@ -421,144 +394,79 @@ export const db = {
     } catch (err: any) {
       console.warn("Firestore getFaceProfile error:", err.message);
     }
-
-    // Local storage fallback
-    const cached = localStorage.getItem(`aura_user_${uid}`);
-    if (cached) {
-      try {
-        const parsed = JSON.parse(cached);
-        const emb = parsed.faceProfile?.embedding || parsed.faceDescriptor || parsed.faceProfile?.faceEmbedding;
-        if (emb && Array.isArray(emb)) {
-          return {
-            embedding: Array.from(emb),
-            registered: Boolean(parsed.registered),
-            sampleCount: parsed.sampleCount || 1
-          };
-        }
-      } catch {}
-    }
     return null;
   },
 
+  async getFaceProfileByEmail(email: string): Promise<EnrolledProfile> {
+    const normalizedEmail = email?.trim().toLowerCase();
+    if (!normalizedEmail || !normalizedEmail.includes('@')) {
+      const err: any = new Error('Enter your account email to use Face ID.');
+      err.code = 'NO_EMAIL';
+      throw err;
+    }
+
+    console.log(`[AURA FACE] Resolving remote biometric profile for ${normalizedEmail}`);
+
+    try {
+      const res = await fetch('/api/auth/face-profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: normalizedEmail }),
+      });
+
+      const data = await res.json();
+
+      if (res.status === 404 || data.code === 'NO_FACE_ID_REGISTERED') {
+        const notFoundErr: any = new Error(
+          'No Face ID is registered for this account. Please sign in with your password and register Face ID.'
+        );
+        notFoundErr.code = 'NO_FACE_ID_REGISTERED';
+        throw notFoundErr;
+      }
+
+      if (!res.ok || !data.success || !data.profile) {
+        const genErr: any = new Error(data.error || 'Unable to verify Face ID right now. Please try again.');
+        genErr.code = 'SERVER_ERROR';
+        throw genErr;
+      }
+
+      const p = data.profile;
+      if (!p.embedding || !Array.isArray(p.embedding) || p.embedding.length !== 128) {
+        const noEmbErr: any = new Error(
+          'No Face ID is registered for this account. Please sign in with your password and register Face ID.'
+        );
+        noEmbErr.code = 'NO_FACE_ID_REGISTERED';
+        throw noEmbErr;
+      }
+
+      console.log('[AURA FACE] Remote biometric profile successfully resolved for account');
+      return {
+        uid: p.uid,
+        name: p.name || 'User',
+        email: p.email || normalizedEmail,
+        embedding: Array.from(p.embedding),
+        sampleCount: p.sampleCount || 1,
+      };
+    } catch (err: any) {
+      if (err.code === 'NO_FACE_ID_REGISTERED' || err.code === 'NO_EMAIL') {
+        throw err;
+      }
+      console.warn('[AURA FACE] Face profile lookup notice:', err?.message || err);
+      const netErr: any = new Error('Unable to verify Face ID right now. Please try again.');
+      netErr.code = 'NETWORK_ERROR';
+      throw netErr;
+    }
+  },
+
   async getEnrolledProfiles(emailFilter?: string): Promise<EnrolledProfile[]> {
-    console.log('[AURA FACE] Loading enrolled profile');
     const normalizedEmail = emailFilter?.trim().toLowerCase();
-    const profiles: EnrolledProfile[] = [];
-
-    // 1. Read from local storage index (fast in-memory cache, zero network overhead)
-    try {
-      const indexStr = localStorage.getItem('aura_users_index') || '[]';
-      const userIndex: string[] = JSON.parse(indexStr);
-
-      for (const uid of userIndex) {
-        const cached = localStorage.getItem(`aura_user_${uid}`);
-        if (cached) {
-          try {
-            const parsed = JSON.parse(cached);
-            const emb = parsed.faceDescriptor || parsed.faceProfile?.embedding || parsed.faceProfile?.faceEmbedding;
-            if (emb && Array.isArray(emb) && emb.length === 128) {
-              const prof: EnrolledProfile = {
-                uid: parsed.uid || uid,
-                name: parsed.name || 'User',
-                email: parsed.email || '',
-                embedding: Array.from(emb),
-                sampleCount: parsed.sampleCount || parsed.faceProfile?.sampleCount || 1,
-              };
-
-              if (normalizedEmail) {
-                if (prof.email.toLowerCase() === normalizedEmail) {
-                  profiles.push(prof);
-                }
-              } else {
-                profiles.push(prof);
-              }
-            }
-          } catch {}
-        }
-      }
-    } catch (e: any) {
-      console.warn("[AURA FACE] Local biometric cache read notice:", {
-        code: e?.code,
-        message: e?.message,
-        name: e?.name,
-      });
+    if (!normalizedEmail) {
+      // Per security mandate: DO NOT download all users' face embeddings to the client
+      return [];
     }
 
-    // 2. Also check direct localStorage keys in case index was bypassed
-    if (profiles.length === 0 && !normalizedEmail) {
-      try {
-        for (let i = 0; i < localStorage.length; i++) {
-          const key = localStorage.key(i);
-          if (key && key.startsWith('aura_user_')) {
-            const raw = localStorage.getItem(key);
-            if (raw) {
-              try {
-                const parsed = JSON.parse(raw);
-                const emb = parsed.faceDescriptor || parsed.faceProfile?.embedding;
-                if (emb && Array.isArray(emb) && emb.length === 128) {
-                  profiles.push({
-                    uid: parsed.uid || key.replace('aura_user_', ''),
-                    name: parsed.name || 'User',
-                    email: parsed.email || '',
-                    embedding: Array.from(emb),
-                    sampleCount: parsed.sampleCount || 1
-                  });
-                }
-              } catch {}
-            }
-          }
-        }
-      } catch {}
-    }
-
-    // 3. Attempt Firestore query for remote enrolled profiles if available
-    try {
-      if (normalizedEmail) {
-        const q = query(collection(firestore, 'users'), where('email', '==', normalizedEmail));
-        const snap = await getDocs(q);
-        snap.forEach((d) => {
-          const data = d.data();
-          const emb = data.faceDescriptor || data.faceProfile?.embedding;
-          if (emb && Array.isArray(emb) && emb.length === 128) {
-            if (!profiles.some(p => p.uid === d.id)) {
-              profiles.push({
-                uid: d.id,
-                name: data.name || 'User',
-                email: data.email || normalizedEmail,
-                embedding: Array.from(emb),
-                sampleCount: data.sampleCount || 1,
-              });
-            }
-          }
-        });
-      } else {
-        const snap = await getDocs(collection(firestore, 'users'));
-        snap.forEach((d) => {
-          const data = d.data();
-          const emb = data.faceDescriptor || data.faceProfile?.embedding;
-          if (emb && Array.isArray(emb) && emb.length === 128) {
-            if (!profiles.some(p => p.uid === d.id)) {
-              profiles.push({
-                uid: d.id,
-                name: data.name || 'User',
-                email: data.email || '',
-                embedding: Array.from(emb),
-                sampleCount: data.sampleCount || 1,
-              });
-            }
-          }
-        });
-      }
-    } catch (fsErr: any) {
-      console.warn("[AURA FACE] Remote enrolled profile sync notice:", {
-        code: fsErr?.code,
-        message: fsErr?.message,
-        name: fsErr?.name,
-      });
-    }
-
-    console.log('[AURA FACE] Enrolled profile loaded');
-    return profiles;
+    const singleProfile = await this.getFaceProfileByEmail(normalizedEmail);
+    return [singleProfile];
   },
 
   async saveUserProfile(uid: string, data: { name: string, email: string, faceDescriptor: number[] }): Promise<void> {

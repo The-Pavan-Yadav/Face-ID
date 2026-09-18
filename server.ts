@@ -6,6 +6,7 @@ import { getAuth } from 'firebase-admin/auth';
 import { getFirestore } from 'firebase-admin/firestore';
 import { createServer as createViteServer } from 'vite';
 import dotenv from 'dotenv';
+import { faceAuthStore } from './server/faceAuthStore';
 
 dotenv.config();
 
@@ -76,6 +77,122 @@ async function startServer() {
 
   app.get('/api/health', (req, res) => {
     res.json({ status: 'ok' });
+  });
+
+  // Secure cross-device Face ID profile lookup by email
+  app.post('/api/auth/face-profile', async (req, res) => {
+    try {
+      const { email } = req.body;
+      if (!email || typeof email !== 'string' || !email.includes('@')) {
+        return res.status(400).json({
+          success: false,
+          error: 'Enter your account email to use Face ID.'
+        });
+      }
+
+      const normalizedEmail = email.toLowerCase().trim();
+
+      // 1. Check persistent faceAuthStore (works across all devices and server reboots)
+      let profile = faceAuthStore.getProfileByEmail(normalizedEmail);
+
+      // 2. If not in store but Firebase Admin is active, query Firestore authoritative documents
+      if (!profile && isFirebaseAdminInitialized) {
+        try {
+          const db = getFirestore();
+          // Look up user document by email
+          const userQuery = await db.collection('users').where('email', '==', normalizedEmail).limit(1).get();
+          if (!userQuery.empty) {
+            const userDoc = userQuery.docs[0];
+            const userData = userDoc.data();
+            const uid = userDoc.id;
+
+            // Check biometric subcollection document at users/{uid}/faceProfile/biometric
+            const bioDoc = await db.collection('users').doc(uid).collection('faceProfile').doc('biometric').get();
+            let embedding: number[] | null = null;
+
+            if (bioDoc.exists) {
+              const bioData = bioDoc.data();
+              if (Array.isArray(bioData?.embedding) && bioData.embedding.length === 128) {
+                embedding = bioData.embedding;
+              }
+            }
+
+            // Fallback to user document root embedding
+            if (!embedding && Array.isArray(userData?.faceDescriptor) && userData.faceDescriptor.length === 128) {
+              embedding = userData.faceDescriptor;
+            }
+
+            if (embedding) {
+              profile = {
+                uid,
+                name: userData.name || 'User',
+                email: normalizedEmail,
+                embedding,
+                registered: true,
+                version: 1,
+                updatedAt: new Date().toISOString()
+              };
+              // Cache in store for subsequent rapid verification
+              faceAuthStore.saveProfile(profile);
+            }
+          }
+        } catch (adminErr) {
+          console.warn('[FaceAuth] Admin Firestore query notice:', adminErr);
+        }
+      }
+
+      if (!profile || !profile.embedding || profile.embedding.length !== 128) {
+        return res.status(404).json({
+          success: false,
+          code: 'NO_FACE_ID_REGISTERED',
+          error: 'No Face ID is registered for this account. Please sign in with your password and register Face ID.'
+        });
+      }
+
+      // Return ONLY the requested user's biometric profile
+      return res.json({
+        success: true,
+        profile: {
+          uid: profile.uid,
+          name: profile.name,
+          email: profile.email,
+          embedding: profile.embedding,
+          registered: true
+        }
+      });
+    } catch (err: any) {
+      console.error('[FaceAuth] Lookup error:', err);
+      return res.status(500).json({
+        success: false,
+        error: 'Unable to verify Face ID right now. Please try again.'
+      });
+    }
+  });
+
+  // Cross-device registration sync endpoint
+  app.post('/api/auth/sync-profile', async (req, res) => {
+    try {
+      const { uid, name, email, embedding, sampleCount } = req.body;
+      if (!uid || !email || !Array.isArray(embedding) || embedding.length !== 128) {
+        return res.status(400).json({ success: false, error: 'Invalid biometric profile payload' });
+      }
+
+      faceAuthStore.saveProfile({
+        uid,
+        name: name || 'User',
+        email,
+        embedding,
+        registered: true,
+        sampleCount: sampleCount || 1,
+        version: 1
+      });
+
+      console.log(`[FaceAuth] Synchronized biometric profile for account: ${email}`);
+      return res.json({ success: true });
+    } catch (err: any) {
+      console.error('[FaceAuth] Sync error:', err);
+      return res.status(500).json({ success: false, error: err.message || 'Failed to sync biometric profile' });
+    }
   });
 
   app.post('/api/auth/face-login', async (req, res) => {
