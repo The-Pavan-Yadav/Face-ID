@@ -1,17 +1,28 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { User } from '../types';
 import { Button } from '../components/ui/Button';
 import { AuraLogo } from '../components/AuraLogo';
 import { AmbientBackground } from '../components/AmbientBackground';
 import { ShieldCheck, LogOut, CheckCircle2, User as UserIcon, Mail, Calendar, Key } from 'lucide-react';
+import { FaceIDSettings } from '../components/FaceIDSettings';
 
 interface DashboardProps {
   user: User;
   onSignOut: () => void;
+  onUpdateUser?: (updated: User) => void;
 }
 
-export function Dashboard({ user, onSignOut }: DashboardProps) {
-  const isEnrolled = !!(user.faceDescriptor && user.faceDescriptor.length === 128);
+export function Dashboard({ user, onSignOut, onUpdateUser }: DashboardProps) {
+  const [currentUser, setCurrentUser] = useState<User>(user);
+
+  const handleUserUpdate = (updated: User) => {
+    setCurrentUser(updated);
+    if (onUpdateUser) {
+      onUpdateUser(updated);
+    }
+  };
+
+  const isEnrolled = !!(currentUser.faceDescriptor && currentUser.faceDescriptor.length === 128);
 
   return (
     <div className="min-h-screen bg-[#F7F8FA] text-[#111318] font-sans relative flex flex-col justify-between">
@@ -42,12 +53,15 @@ export function Dashboard({ user, onSignOut }: DashboardProps) {
               <span>SESSION ACTIVE • SEC-2026</span>
             </div>
             <h1 className="text-2xl sm:text-3xl font-semibold tracking-tight text-[#111318]">
-              Welcome back, {user.name}.
+              Welcome back, {currentUser.name}.
             </h1>
             <p className="text-sm text-[#626873]">
               Authenticated securely via AURA Zero-Knowledge Identity Enclave.
             </p>
           </div>
+
+          {/* Face ID Settings & Re-Registration (30-day enforcement) */}
+          <FaceIDSettings user={currentUser} onUpdateUser={handleUserUpdate} />
 
           {/* Account Credentials Card */}
           <div className="rounded-2xl bg-white border border-[#E5E7EB] shadow-[0_4px_24px_-4px_rgba(17,19,24,0.06)] p-6 sm:p-7 space-y-6 text-left">
@@ -57,7 +71,7 @@ export function Dashboard({ user, onSignOut }: DashboardProps) {
                 <span>Identity Credentials</span>
               </div>
               <span className="text-[11px] font-mono text-[#626873] bg-slate-100 border border-[#E4E6EA] px-2.5 py-0.5 rounded-full">
-                UID: {user.uid?.slice(0, 8)}...
+                UID: {currentUser.uid?.slice(0, 8)}...
               </span>
             </div>
 
@@ -67,7 +81,7 @@ export function Dashboard({ user, onSignOut }: DashboardProps) {
                   <UserIcon className="w-4 h-4 text-[#8E95A2]" />
                   <span>Display name</span>
                 </dt>
-                <dd className="text-[#111318] font-medium">{user.name}</dd>
+                <dd className="text-[#111318] font-medium">{currentUser.name}</dd>
               </div>
 
               <div className="py-3.5 flex items-center justify-between">
@@ -75,7 +89,7 @@ export function Dashboard({ user, onSignOut }: DashboardProps) {
                   <Mail className="w-4 h-4 text-[#8E95A2]" />
                   <span>Email address</span>
                 </dt>
-                <dd className="text-[#111318] font-mono text-xs">{user.email}</dd>
+                <dd className="text-[#111318] font-mono text-xs">{currentUser.email}</dd>
               </div>
 
               <div className="py-3.5 flex items-center justify-between">
@@ -97,7 +111,7 @@ export function Dashboard({ user, onSignOut }: DashboardProps) {
                   <span>Account created</span>
                 </dt>
                 <dd className="text-[#626873] font-mono text-xs">
-                  {user.createdAt ? new Date(user.createdAt).toLocaleDateString() : 'Active'}
+                  {currentUser.createdAt ? new Date(currentUser.createdAt).toLocaleDateString() : 'Active'}
                 </dd>
               </div>
             </dl>
@@ -112,3 +126,4 @@ export function Dashboard({ user, onSignOut }: DashboardProps) {
     </div>
   );
 }
+

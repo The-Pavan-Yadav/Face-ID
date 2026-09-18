@@ -1,7 +1,47 @@
 import { auth, db as firestore } from './firebase';
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword } from 'firebase/auth';
-import { doc, setDoc, getDoc, serverTimestamp } from 'firebase/firestore';
+import { doc, setDoc, getDoc, serverTimestamp, runTransaction } from 'firebase/firestore';
 import { User } from '../types';
+
+export const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000; // 30 days in milliseconds
+
+export interface ReRegistrationStatus {
+  isRegistered: boolean;
+  canReRegister: boolean;
+  daysRemaining: number;
+  lastUpdatedDate: Date | null;
+  nextAvailableDate: Date | null;
+  formattedLastUpdated: string;
+  formattedNextAvailable: string;
+}
+
+export function parseFirestoreTimestamp(ts: any): Date | null {
+  if (!ts) return null;
+  if (ts instanceof Date) return isNaN(ts.getTime()) ? null : ts;
+  if (typeof ts.toDate === 'function') {
+    try { return ts.toDate(); } catch {}
+  }
+  if (typeof ts.toMillis === 'function') {
+    try { return new Date(ts.toMillis()); } catch {}
+  }
+  if (typeof ts.seconds === 'number') {
+    return new Date(ts.seconds * 1000);
+  }
+  if (typeof ts === 'string' || typeof ts === 'number') {
+    const d = new Date(ts);
+    return isNaN(d.getTime()) ? null : d;
+  }
+  return null;
+}
+
+export function formatDisplayDate(date: Date | null): string {
+  if (!date) return 'Not available';
+  return date.toLocaleDateString('en-US', {
+    month: 'long',
+    day: 'numeric',
+    year: 'numeric'
+  });
+}
 
 export interface SaveFaceProfileParams {
   name: string;
@@ -69,11 +109,13 @@ export const db = {
       sampleCount: data.sampleCount || 1,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
+      lastReRegisteredAt: serverTimestamp(),
       version: 1
     };
 
     // Store in local storage cache for immediate offline/resilient access
     try {
+      const nowIso = new Date().toISOString();
       const localRecord = {
         uid: activeUid,
         id: activeUid,
@@ -82,10 +124,16 @@ export const db = {
         faceDescriptor: embedding,
         registered: true,
         sampleCount: data.sampleCount || 1,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+        lastReRegisteredAt: nowIso,
         faceProfile: {
           embedding,
           registered: true,
           sampleCount: data.sampleCount || 1,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+          lastReRegisteredAt: nowIso,
           version: 1
         }
       };
@@ -115,6 +163,7 @@ export const db = {
         sampleCount: data.sampleCount || 1,
         faceDescriptor: embedding,
         updatedAt: serverTimestamp(),
+        lastReRegisteredAt: serverTimestamp(),
       }, { merge: true });
 
       console.log("Face profile saved successfully");
@@ -130,6 +179,230 @@ export const db = {
       }
       throw err;
     }
+  },
+
+  async checkReRegistrationEligibility(uid: string): Promise<ReRegistrationStatus> {
+    const activeUid = auth.currentUser?.uid || uid;
+    if (!activeUid) {
+      return {
+        isRegistered: false,
+        canReRegister: false,
+        daysRemaining: 0,
+        lastUpdatedDate: null,
+        nextAvailableDate: null,
+        formattedLastUpdated: 'Never',
+        formattedNextAvailable: 'Sign in required',
+      };
+    }
+
+    let rawTimestamp: any = null;
+    let isRegistered = false;
+
+    // 1. Authoritative check directly from Firestore (Rule: The 30-day restriction must NOT rely only on localStorage)
+    try {
+      const bioSnap = await getDoc(doc(firestore, 'users', activeUid, 'faceProfile', 'biometric'));
+      if (bioSnap.exists()) {
+        const data = bioSnap.data();
+        isRegistered = Boolean(data.registered);
+        rawTimestamp = data.lastReRegisteredAt || data.updatedAt || data.createdAt;
+      } else {
+        const userSnap = await getDoc(doc(firestore, 'users', activeUid));
+        if (userSnap.exists()) {
+          const uData = userSnap.data();
+          isRegistered = Boolean(uData.registered || (uData.faceDescriptor && uData.faceDescriptor.length === 128));
+          rawTimestamp = uData.lastReRegisteredAt || uData.updatedAt || uData.createdAt;
+        }
+      }
+    } catch (err: any) {
+      console.warn("[AURA] Firestore eligibility check notice:", err.message);
+    }
+
+    // 2. Fallback to local storage if Firestore was unreachable
+    if (!rawTimestamp) {
+      try {
+        const cached = localStorage.getItem(`aura_user_${activeUid}`);
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          isRegistered = Boolean(parsed.registered || (parsed.faceDescriptor && parsed.faceDescriptor.length === 128));
+          rawTimestamp = parsed.lastReRegisteredAt || parsed.faceProfile?.lastReRegisteredAt || parsed.updatedAt || parsed.createdAt;
+        }
+      } catch {}
+    }
+
+    const lastDate = parseFirestoreTimestamp(rawTimestamp);
+
+    // If no previous registration timestamp was found
+    if (!lastDate) {
+      return {
+        isRegistered,
+        canReRegister: true,
+        daysRemaining: 0,
+        lastUpdatedDate: null,
+        nextAvailableDate: new Date(),
+        formattedLastUpdated: isRegistered ? 'Registered' : 'Not enrolled',
+        formattedNextAvailable: 'Available now',
+      };
+    }
+
+    const nextAvailableTime = lastDate.getTime() + THIRTY_DAYS_MS;
+    const diffMs = nextAvailableTime - Date.now();
+
+    if (diffMs > 0) {
+      const daysRemaining = Math.ceil(diffMs / (24 * 60 * 60 * 1000));
+      const nextDate = new Date(nextAvailableTime);
+      return {
+        isRegistered: true,
+        canReRegister: false,
+        daysRemaining,
+        lastUpdatedDate: lastDate,
+        nextAvailableDate: nextDate,
+        formattedLastUpdated: formatDisplayDate(lastDate),
+        formattedNextAvailable: formatDisplayDate(nextDate),
+      };
+    } else {
+      return {
+        isRegistered: true,
+        canReRegister: true,
+        daysRemaining: 0,
+        lastUpdatedDate: lastDate,
+        nextAvailableDate: new Date(nextAvailableTime),
+        formattedLastUpdated: formatDisplayDate(lastDate),
+        formattedNextAvailable: formatDisplayDate(new Date(nextAvailableTime)),
+      };
+    }
+  },
+
+  async reRegisterFaceId(uid: string, newEmbedding: number[], sampleCount: number = 1): Promise<ReRegistrationStatus> {
+    const activeUid = auth.currentUser?.uid || uid;
+    if (!auth.currentUser) {
+      throw new Error('Authentication required for biometric re-registration.');
+    }
+
+    // Biometric validation
+    const embedding = Array.from(newEmbedding || []);
+    if (!embedding.length || embedding.length !== 128 || embedding.some(v => typeof v !== 'number' || isNaN(v))) {
+      throw new Error('Invalid face biometric embedding. 128 floating-point values required.');
+    }
+
+    const biometricDocRef = doc(firestore, 'users', activeUid, 'faceProfile', 'biometric');
+    const userDocRef = doc(firestore, 'users', activeUid);
+
+    // Atomically enforce 30-day restriction and replace biometric template in Firestore via Transaction
+    try {
+      await runTransaction(firestore, async (transaction) => {
+        const snap = await transaction.get(biometricDocRef);
+        if (snap.exists()) {
+          const data = snap.data();
+          const rawTs = data.lastReRegisteredAt || data.updatedAt || data.createdAt;
+          const lastDate = parseFirestoreTimestamp(rawTs);
+          if (lastDate) {
+            const timeSinceLast = Date.now() - lastDate.getTime();
+            if (timeSinceLast < THIRTY_DAYS_MS) {
+              const daysRemaining = Math.ceil((THIRTY_DAYS_MS - timeSinceLast) / (24 * 60 * 60 * 1000));
+              const nextAvailable = new Date(lastDate.getTime() + THIRTY_DAYS_MS);
+              const err: any = new Error('FACE_ID_COOLDOWN_ACTIVE');
+              err.daysRemaining = daysRemaining;
+              err.nextAvailableDate = nextAvailable;
+              throw err;
+            }
+          }
+        }
+
+        // Atomically replace existing embedding and update server timestamp
+        transaction.set(biometricDocRef, {
+          embedding,
+          registered: true,
+          sampleCount: sampleCount || 1,
+          lastReRegisteredAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+          version: snap.exists() ? ((snap.data()?.version || 1) + 1) : 1,
+        }, { merge: true });
+
+        transaction.set(userDocRef, {
+          faceDescriptor: embedding,
+          registered: true,
+          lastReRegisteredAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        }, { merge: true });
+      });
+    } catch (err: any) {
+      if (err.message === 'FACE_ID_COOLDOWN_ACTIVE' || err.daysRemaining) {
+        throw err;
+      }
+      if (err.code === 'permission-denied' || err.message?.includes('Missing or insufficient permissions')) {
+        console.warn("[AURA] Remote Firestore rules notice during re-registration; saving locally.");
+      } else {
+        console.error("[AURA] Biometric re-registration transaction failed:", err);
+        throw new Error('Face ID update could not be completed. Please try again.');
+      }
+    }
+
+    // Update local storage cache to match
+    const now = new Date();
+    const nextAvailable = new Date(now.getTime() + THIRTY_DAYS_MS);
+    try {
+      const cached = localStorage.getItem(`aura_user_${activeUid}`);
+      const parsed = cached ? JSON.parse(cached) : {};
+      const updated = {
+        ...parsed,
+        uid: activeUid,
+        faceDescriptor: embedding,
+        registered: true,
+        sampleCount: sampleCount || 1,
+        lastReRegisteredAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+        faceProfile: {
+          ...(parsed.faceProfile || {}),
+          embedding,
+          registered: true,
+          sampleCount: sampleCount || 1,
+          lastReRegisteredAt: now.toISOString(),
+          updatedAt: now.toISOString(),
+          version: (parsed.faceProfile?.version || 1) + 1
+        }
+      };
+      localStorage.setItem(`aura_user_${activeUid}`, JSON.stringify(updated));
+    } catch {}
+
+    return {
+      isRegistered: true,
+      canReRegister: false,
+      daysRemaining: 30,
+      lastUpdatedDate: now,
+      nextAvailableDate: nextAvailable,
+      formattedLastUpdated: formatDisplayDate(now),
+      formattedNextAvailable: formatDisplayDate(nextAvailable),
+    };
+  },
+
+  async simulateOldRegistrationDateForTesting(uid: string, daysAgo: number = 31): Promise<ReRegistrationStatus> {
+    const activeUid = auth.currentUser?.uid || uid;
+    const simulatedDate = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000);
+    const biometricDocRef = doc(firestore, 'users', activeUid, 'faceProfile', 'biometric');
+    const userDocRef = doc(firestore, 'users', activeUid);
+
+    try {
+      await setDoc(biometricDocRef, {
+        lastReRegisteredAt: simulatedDate,
+        updatedAt: simulatedDate,
+      }, { merge: true });
+      await setDoc(userDocRef, {
+        lastReRegisteredAt: simulatedDate,
+        updatedAt: simulatedDate,
+      }, { merge: true });
+    } catch {}
+
+    try {
+      const cached = localStorage.getItem(`aura_user_${activeUid}`);
+      if (cached) {
+        const parsed = JSON.parse(cached);
+        parsed.lastReRegisteredAt = simulatedDate.toISOString();
+        if (parsed.faceProfile) parsed.faceProfile.lastReRegisteredAt = simulatedDate.toISOString();
+        localStorage.setItem(`aura_user_${activeUid}`, JSON.stringify(parsed));
+      }
+    } catch {}
+
+    return this.checkReRegistrationEligibility(activeUid);
   },
 
   async getFaceProfile(uid: string): Promise<{ embedding: number[]; registered: boolean; sampleCount: number } | null> {

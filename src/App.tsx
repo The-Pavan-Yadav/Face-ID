@@ -52,7 +52,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[#080a12] text-slate-100 overflow-x-hidden selection:bg-indigo-500/30 selection:text-indigo-200">
+    <div className="min-h-screen bg-[#F7F8FA] text-[#111318] overflow-x-hidden selection:bg-slate-200 selection:text-[#111318]">
       <AnimatePresence mode="wait">
         {view === 'dashboard' && user ? (
           <motion.div 
@@ -62,7 +62,7 @@ export default function App() {
             exit={{ opacity: 0 }}
             transition={{ duration: 0.3 }}
           >
-            <Dashboard user={user} onSignOut={handleLogout} />
+            <Dashboard user={user} onSignOut={handleLogout} onUpdateUser={setUser} />
           </motion.div>
         ) : view === 'register' ? (
           <motion.div 

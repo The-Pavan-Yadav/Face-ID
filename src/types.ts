@@ -5,4 +5,6 @@ export interface User {
   email: string;
   faceDescriptor: number[] | null;
   createdAt?: any;
+  updatedAt?: any;
+  lastReRegisteredAt?: any;
 }
