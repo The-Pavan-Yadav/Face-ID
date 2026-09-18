@@ -3,7 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useEffect } from 'react';
+import React, { useState } from 'react';
+import { motion, AnimatePresence } from 'motion/react';
 import { Login } from './views/Login';
 import { Register } from './views/Register';
 import { FaceLogin } from './views/FaceLogin';
@@ -33,18 +34,51 @@ export default function App() {
     setView('login');
   };
 
-  if (view === 'dashboard' && user) {
-    return <Dashboard user={user} onSignOut={handleLogout} />;
-  }
-
-  if (view === 'register') {
-    return <Register onSuccess={() => setView('login')} onNavigate={setView} />;
-  }
-
-  if (view === 'face-login') {
-    return <FaceLogin onLogin={handleLogin} onNavigate={setView} />;
-  }
-
-  return <Login onLogin={handleLogin} onNavigate={setView} />;
+  return (
+    <div className="min-h-screen bg-[#080a12] text-slate-100 overflow-x-hidden selection:bg-indigo-500/30 selection:text-indigo-200">
+      <AnimatePresence mode="wait">
+        {view === 'dashboard' && user ? (
+          <motion.div 
+            key="view-dashboard"
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            transition={{ duration: 0.3 }}
+          >
+            <Dashboard user={user} onSignOut={handleLogout} />
+          </motion.div>
+        ) : view === 'register' ? (
+          <motion.div 
+            key="view-register"
+            initial={{ opacity: 0, scale: 0.985 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.985 }}
+            transition={{ duration: 0.28, ease: [0.16, 1, 0.3, 1] }}
+          >
+            <Register onSuccess={() => setView('login')} onNavigate={setView} />
+          </motion.div>
+        ) : view === 'face-login' ? (
+          <motion.div 
+            key="view-face-login"
+            initial={{ opacity: 0, scale: 0.98 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.98 }}
+            transition={{ duration: 0.35, ease: [0.16, 1, 0.3, 1] }}
+          >
+            <FaceLogin onLogin={handleLogin} onNavigate={setView} />
+          </motion.div>
+        ) : (
+          <motion.div 
+            key="view-login"
+            initial={{ opacity: 0, scale: 0.98 }}
+            animate={{ opacity: 1, scale: 1 }}
+            exit={{ opacity: 0, scale: 0.98 }}
+            transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
+          >
+            <Login onLogin={handleLogin} onNavigate={setView} />
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
 }
-

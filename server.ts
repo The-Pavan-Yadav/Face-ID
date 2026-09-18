@@ -92,23 +92,45 @@ async function startServer() {
       }
 
       const db = getFirestore();
-      const usersSnapshot = await db.collection('users').get();
       
-      let matchedUid = null;
+      let matchedUid: string | null = null;
       let minDistance = Infinity;
-      const THRESHOLD = 0.45; // Stricter professional threshold
+      const THRESHOLD = 0.45; // Stricter biometric verification threshold
 
-      usersSnapshot.forEach(doc => {
-        const data = doc.data();
-        const embedding = data.faceProfile?.faceEmbedding || data.faceDescriptor;
-        if (embedding && Array.isArray(embedding)) {
-          const distance = euclideanDistance(descriptor, embedding);
-          if (distance < minDistance && distance < THRESHOLD) {
-            minDistance = distance;
-            matchedUid = doc.id;
+      // 1. Query biometric embeddings from users/{uid}/faceProfile/{docId}
+      try {
+        const biometricSnapshot = await db.collectionGroup('faceProfile').get();
+        biometricSnapshot.forEach(doc => {
+          const data = doc.data();
+          const embedding = data.embedding || data.faceEmbedding;
+          if (embedding && Array.isArray(embedding) && embedding.length === 128) {
+            const distance = euclideanDistance(descriptor, embedding);
+            if (distance < minDistance && distance < THRESHOLD) {
+              minDistance = distance;
+              // Subcollection parent is /users/{uid}/faceProfile, parent.parent is /users/{uid}
+              matchedUid = doc.ref.parent?.parent?.id || doc.id;
+            }
           }
-        }
-      });
+        });
+      } catch (cgErr) {
+        console.warn("CollectionGroup faceProfile query notice:", cgErr);
+      }
+
+      // 2. Also check root user documents for backwards compatibility
+      if (!matchedUid) {
+        const usersSnapshot = await db.collection('users').get();
+        usersSnapshot.forEach(doc => {
+          const data = doc.data();
+          const embedding = data.faceProfile?.embedding || data.faceProfile?.faceEmbedding || data.faceDescriptor;
+          if (embedding && Array.isArray(embedding) && embedding.length === 128) {
+            const distance = euclideanDistance(descriptor, embedding);
+            if (distance < minDistance && distance < THRESHOLD) {
+              minDistance = distance;
+              matchedUid = doc.id;
+            }
+          }
+        });
+      }
 
       if (matchedUid) {
         // Mint a custom token for the verified user

@@ -1,1 +1,143 @@
 @import "tailwindcss";
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+  
+  html, body {
+    background-color: #07090e;
+    color: #f1f5f9;
+    font-feature-settings: "cv02", "cv03", "cv04", "cv11";
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    overflow-x: hidden;
+    scrollbar-width: none !important;
+    -ms-overflow-style: none !important;
+  }
+
+  /* Completely remove side scrollbar for all browsers */
+  html::-webkit-scrollbar,
+  body::-webkit-scrollbar,
+  #root::-webkit-scrollbar,
+  *::-webkit-scrollbar {
+    display: none !important;
+    width: 0px !important;
+    height: 0px !important;
+  }
+
+  * {
+    scrollbar-width: none !important;
+    -ms-overflow-style: none !important;
+  }
+}
+
+/* 2026 Biometric Motion & Atmosphere */
+@keyframes ambientOrbOne {
+  0%, 100% {
+    transform: translate3d(0, 0, 0) scale(1);
+    opacity: 0.45;
+  }
+  50% {
+    transform: translate3d(30px, -40px, 0) scale(1.12);
+    opacity: 0.65;
+  }
+}
+
+@keyframes ambientOrbTwo {
+  0%, 100% {
+    transform: translate3d(0, 0, 0) scale(1);
+    opacity: 0.4;
+  }
+  50% {
+    transform: translate3d(-35px, 35px, 0) scale(1.15);
+    opacity: 0.55;
+  }
+}
+
+@keyframes scanLaser {
+  0% {
+    top: 6%;
+    opacity: 0;
+  }
+  15% {
+    opacity: 0.9;
+  }
+  50% {
+    top: 92%;
+    opacity: 0.9;
+  }
+  85% {
+    opacity: 0.9;
+  }
+  100% {
+    top: 6%;
+    opacity: 0;
+  }
+}
+
+@keyframes reticleGlow {
+  0%, 100% {
+    opacity: 0.6;
+    filter: drop-shadow(0 0 2px rgba(139, 92, 246, 0.4));
+  }
+  50% {
+    opacity: 1;
+    filter: drop-shadow(0 0 8px rgba(34, 211, 238, 0.7));
+  }
+}
+
+@keyframes particleFloat {
+  0% {
+    transform: translateY(0px) translateX(0px);
+    opacity: 0.2;
+  }
+  50% {
+    transform: translateY(-25px) translateX(12px);
+    opacity: 0.6;
+  }
+  100% {
+    transform: translateY(0px) translateX(0px);
+    opacity: 0.2;
+  }
+}
+
+@keyframes radarSweep {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.animate-orb-1 {
+  animation: ambientOrbOne 16s ease-in-out infinite;
+}
+
+.animate-orb-2 {
+  animation: ambientOrbTwo 20s ease-in-out infinite;
+}
+
+.animate-scan-laser {
+  animation: scanLaser 2.4s cubic-bezier(0.4, 0, 0.2, 1) infinite;
+}
+
+.animate-reticle {
+  animation: reticleGlow 3s ease-in-out infinite;
+}
+
+.animate-radar {
+  animation: radarSweep 8s linear infinite;
+}
+
+/* Reduced motion preference */
+@media (prefers-reduced-motion: reduce) {
+  .animate-orb-1,
+  .animate-orb-2,
+  .animate-scan-laser,
+  .animate-reticle,
+  .animate-radar {
+    animation: none !important;
+  }
+}

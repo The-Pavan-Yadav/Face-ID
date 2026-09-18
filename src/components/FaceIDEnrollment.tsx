@@ -339,11 +339,15 @@ export function FaceIDEnrollment({ onComplete, onSuccess, onCancel, userName }: 
       setFeedbackMessage('Generating face template...');
 
       // Combine valid sample descriptors into a stable, normalized face template
-      // createFaceTemplate emits: "Face descriptor generated"
       const template = createFaceTemplate(samples);
+      const embedding = Array.from(template);
+
+      if (!embedding.length || embedding.length !== 128) {
+        throw new Error("Face embedding generation failed.");
+      }
 
       // Attempt to securely save the face profile to Firebase Firestore
-      await onComplete(template, samples.length);
+      await onComplete(embedding, samples.length);
 
       // Successfully saved to Firestore!
       setCurrentStep('completing');

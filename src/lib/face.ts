@@ -152,9 +152,33 @@ export async function detectEnrollmentFrame(video: HTMLVideoElement): Promise<En
   };
 }
 
-export function compareDescriptors(desc1: Float32Array, desc2: Float32Array, threshold: number = 0.45): boolean {
-  const distance = faceapi.euclideanDistance(desc1, desc2);
+export function calculateEuclideanDistance(desc1: number[] | Float32Array, desc2: number[] | Float32Array): number {
+  if (!desc1 || !desc2 || desc1.length !== desc2.length) return Infinity;
+  let sum = 0;
+  for (let i = 0; i < desc1.length; i++) {
+    const diff = desc1[i] - desc2[i];
+    sum += diff * diff;
+  }
+  return Math.sqrt(sum);
+}
+
+export function compareDescriptors(desc1: number[] | Float32Array, desc2: number[] | Float32Array, threshold: number = 0.45): boolean {
+  const distance = calculateEuclideanDistance(desc1, desc2);
   return distance < threshold;
+}
+
+export async function extractFaceEmbedding(video: HTMLVideoElement): Promise<number[] | null> {
+  await loadFaceModels();
+  const detection = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.5 }))
+    .withFaceLandmarks()
+    .withFaceDescriptor();
+
+  if (!detection || !detection.descriptor) return null;
+  const embedding = Array.from(detection.descriptor);
+  if (!embedding.length || embedding.length !== 128 || embedding.some(v => typeof v !== 'number' || isNaN(v))) {
+    return null;
+  }
+  return embedding;
 }
 
 export function createFaceTemplate(samples: Float32Array[]): number[] {

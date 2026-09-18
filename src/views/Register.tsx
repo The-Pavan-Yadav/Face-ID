@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { User as UserIcon, Mail, Lock, Sparkles } from 'lucide-react';
 import { AuthLayout } from '../components/AuthLayout';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
@@ -28,9 +29,14 @@ export function Register({ onSuccess, onNavigate }: RegisterProps) {
       return;
     }
 
+    if (formData.password.length < 6) {
+      setError('Password must be at least 6 characters long');
+      return;
+    }
+
     try {
       setIsLoading(true);
-      const uid = await db.createAuthAccount(formData.email, formData.password);
+      const uid = await db.createAuthAccount(formData.email.trim(), formData.password);
       setCreatedUid(uid);
       setStep('face');
     } catch (err: any) {
@@ -70,54 +76,93 @@ export function Register({ onSuccess, onNavigate }: RegisterProps) {
   }
 
   return (
-    <AuthLayout title="Create an account" subtitle="Sign up to Aura Identity">
-      <form onSubmit={handleDetailsSubmit} className="space-y-4">
+    <AuthLayout 
+      title="Create account" 
+      subtitle="Establish your secure AURA biometric identity"
+    >
+      <form onSubmit={handleDetailsSubmit} className="space-y-2.5">
         <Input 
+          id="reg-name"
           label="Full name"
           required
+          autoComplete="name"
+          placeholder="Pavan Kumar"
           value={formData.name}
           onChange={(e) => setFormData(d => ({...d, name: e.target.value}))}
+          startIcon={<UserIcon className="w-4 h-4" />}
         />
+
         <Input 
+          id="reg-email"
           label="Email address"
           type="email"
           required
+          autoComplete="email"
+          placeholder="name@company.com"
           value={formData.email}
           onChange={(e) => setFormData(d => ({...d, email: e.target.value}))}
+          startIcon={<Mail className="w-4 h-4" />}
         />
+
         <Input 
+          id="reg-pass"
           label="Password"
           type="password"
           required
+          autoComplete="new-password"
+          placeholder="••••••••••••"
           value={formData.password}
           onChange={(e) => setFormData(d => ({...d, password: e.target.value}))}
+          startIcon={<Lock className="w-4 h-4" />}
         />
+
         <Input 
+          id="reg-confirm"
           label="Confirm password"
           type="password"
           required
+          autoComplete="new-password"
+          placeholder="••••••••••••"
           value={formData.confirm}
           onChange={(e) => setFormData(d => ({...d, confirm: e.target.value}))}
+          startIcon={<Lock className="w-4 h-4" />}
         />
 
-        {error && <div className="text-sm text-red-600 font-medium">{error}</div>}
-
-        {needsSignIn ? (
-          <Button type="button" variant="secondary" className="w-full mt-2" onClick={() => onNavigate('login')}>
-            Go to Sign In
-          </Button>
-        ) : (
-          <Button type="submit" className="w-full mt-2" isLoading={isLoading}>
-            Continue to Face ID Setup
-          </Button>
+        {error && (
+          <div className="p-3 rounded-xl bg-rose-500/10 border border-rose-500/25 text-rose-300 text-xs flex items-start gap-2 text-left leading-relaxed">
+            <span className="shrink-0 w-1.5 h-1.5 rounded-full bg-rose-400 mt-1.5" />
+            <span>{error}</span>
+          </div>
         )}
 
-        <p className="mt-6 text-center text-sm text-slate-600">
-          Already have an account?{' '}
+        <div className="pt-1.5">
+          {needsSignIn ? (
+            <Button 
+              type="button" 
+              variant="secondary" 
+              className="w-full" 
+              onClick={() => onNavigate('login')}
+            >
+              Return to Sign In
+            </Button>
+          ) : (
+            <Button 
+              type="submit" 
+              className="w-full font-semibold" 
+              isLoading={isLoading}
+              loadingText="Creating account..."
+            >
+              Continue to Face ID Setup
+            </Button>
+          )}
+        </div>
+
+        <p className="pt-1.5 text-center text-xs text-slate-400">
+          Already registered?{' '}
           <button 
             type="button" 
             onClick={() => onNavigate('login')}
-            className="font-medium text-slate-900 hover:underline"
+            className="font-medium text-slate-200 hover:text-indigo-300 transition-colors focus:outline-none focus-visible:underline"
           >
             Sign in
           </button>
