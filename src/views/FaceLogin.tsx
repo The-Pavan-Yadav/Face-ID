@@ -6,8 +6,7 @@ import { CameraView } from '../components/CameraView';
 import { Button } from '../components/ui/Button';
 import { Input } from '../components/ui/Input';
 import { User } from '../types';
-import { db, EnrolledProfile } from '../lib/db';
-import { calculateEuclideanDistance } from '../lib/face';
+import { captureVideoFrameBase64 } from '../lib/face';
 
 interface FaceLoginProps {
   onLogin: (user: User) => void;
@@ -23,13 +22,9 @@ export function FaceLogin({ onLogin, onNavigate, initialEmail = '' }: FaceLoginP
   const [error, setError] = useState<string | null>(null);
   const [isSuccess, setIsSuccess] = useState(false);
   const [verifiedUserName, setVerifiedUserName] = useState<string>('');
-  const [isResolvingProfile, setIsResolvingProfile] = useState(false);
+  const [isVerifying, setIsVerifying] = useState(false);
 
-  // Cached enrolled profile in memory for the active account
-  const cachedProfileRef = useRef<EnrolledProfile | null>(null);
   const isVerifyingRef = useRef(false);
-  const uncertainSamplesRef = useRef(0);
-  const noMatchCountRef = useRef(0);
   const recognitionStartRef = useRef(performance.now());
 
   // Email validation helper
@@ -37,74 +32,26 @@ export function FaceLogin({ onLogin, onNavigate, initialEmail = '' }: FaceLoginP
     return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
   };
 
-  // 1. Resolve enrolled biometric profile when email is provided
+  // Sync status message with email input state
   useEffect(() => {
-    let active = true;
-    const email = accountEmail.trim().toLowerCase();
-
+    const email = accountEmail.trim();
     if (!email) {
-      cachedProfileRef.current = null;
       setStatusMessage('Enter your account email to use Face ID.');
-      return;
-    }
-
-    if (!isValidEmail(email)) {
-      cachedProfileRef.current = null;
+    } else if (!isValidEmail(email)) {
       setStatusMessage('Enter your account email to use Face ID.');
-      return;
+    } else if (!error && !isSuccess && !isVerifying) {
+      setStatusMessage('Looking for your face...');
     }
+  }, [accountEmail, error, isSuccess, isVerifying]);
 
-    async function loadAccountBiometrics() {
-      setIsResolvingProfile(true);
-      setStatusMessage('Locating Face ID profile...');
-      setError(null);
-
-      try {
-        const profile = await db.getFaceProfileByEmail(email);
-        if (active) {
-          cachedProfileRef.current = profile;
-          setStatusMessage('Looking for your face...');
-          setIsResolvingProfile(false);
-        }
-      } catch (err: any) {
-        if (!active) return;
-        setIsResolvingProfile(false);
-        cachedProfileRef.current = null;
-
-        if (err.code === 'NO_FACE_ID_REGISTERED' || err.message?.includes('No Face ID is registered')) {
-          setError('No Face ID is registered for this account. Please sign in with your password and register Face ID.');
-          setStatusMessage('Face ID not registered');
-        } else {
-          setError('Unable to verify Face ID right now. Please try again.');
-          setStatusMessage('Lookup unavailable');
-        }
-      }
-    }
-
-    loadAccountBiometrics();
-
-    return () => {
-      active = false;
-    };
-  }, [accountEmail]);
-
-  // Overall session timeout (only active when email is entered and scanning)
-  useEffect(() => {
-    if (isSuccess || error || !accountEmail.trim() || !isValidEmail(accountEmail)) return;
-
-    const timeoutId = setTimeout(() => {
-      if (!isSuccess && !error) {
-        setError("Unable to verify Face ID right now. Please try again.");
-        setStatusMessage("Verification timed out");
-      }
-    }, 15000);
-
-    return () => clearTimeout(timeoutId);
-  }, [isSuccess, error, accountEmail]);
-
-  // 2. High-speed local biometric verification against the resolved account profile
-  const handleFaceDetected = async (data: { descriptor: Float32Array, landmarks: any, faceDetectedTime?: number }) => {
-    if (isSuccess || isVerifyingRef.current || error || isResolvingProfile) return;
+  // Handle single frame detection and server-side verification
+  const handleFaceDetected = async (data: { 
+    descriptor: Float32Array; 
+    landmarks: any; 
+    videoElement?: HTMLVideoElement;
+    faceDetectedTime?: number;
+  }) => {
+    if (isSuccess || isVerifyingRef.current || error) return;
 
     const email = accountEmail.trim().toLowerCase();
     if (!email || !isValidEmail(email)) {
@@ -112,116 +59,97 @@ export function FaceLogin({ onLogin, onNavigate, initialEmail = '' }: FaceLoginP
       return;
     }
 
-    const enrolledProfile = cachedProfileRef.current;
-    if (!enrolledProfile) {
-      return;
-    }
-
     isVerifyingRef.current = true;
+    setIsVerifying(true);
+    setStatusMessage('Verifying Face ID...');
 
     try {
-      const liveEmbedding = data.descriptor;
-
-      console.log('[AURA FACE] Starting comparison');
+      console.log('[AURA FACE] Face detected. Capturing frame and verifying server-side...');
       const compStart = performance.now();
-      const THRESHOLD = 0.45; // Biometric verification threshold
 
-      const dist = calculateEuclideanDistance(liveEmbedding, enrolledProfile.embedding);
-
-      const compElapsed = (performance.now() - compStart).toFixed(2);
-      console.log(`[AURA] Face comparison: ${compElapsed} ms (distance: ${dist.toFixed(4)})`);
-      console.log('[AURA FACE] Comparison completed');
-
-      if (dist < THRESHOLD) {
-        console.log('[AURA FACE] Match result: MATCH');
-
-        // Borderline check (0.42 to 0.45): verify with 1 confirming sample
-        if (dist > 0.42 && uncertainSamplesRef.current < 1) {
-          uncertainSamplesRef.current += 1;
-          isVerifyingRef.current = false;
-          return;
+      // Capture ONE current frame as base64 JPEG
+      let currentFrameImage = '';
+      if (data.videoElement) {
+        try {
+          currentFrameImage = captureVideoFrameBase64(data.videoElement);
+        } catch (captureErr) {
+          console.warn('[AURA FACE] Video frame capture notice:', captureErr);
         }
+      }
 
-        const totalStart = data.faceDetectedTime || recognitionStartRef.current;
-        const totalRecognitionTime = (performance.now() - totalStart).toFixed(1);
-        console.log(`[AURA] Total recognition: ${totalRecognitionTime} ms`);
+      // Send to the secure server-side recognition process
+      const res = await fetch('/api/auth/face-login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email,
+          descriptor: Array.from(data.descriptor),
+          image: currentFrameImage || undefined,
+        }),
+      });
 
-        // Firebase Authentication
-        console.log('[AURA FACE] Starting Firebase authentication');
-        const verifiedUser: User = {
-          id: enrolledProfile.uid,
-          uid: enrolledProfile.uid,
-          name: enrolledProfile.name,
-          email: enrolledProfile.email,
-          faceDescriptor: enrolledProfile.embedding,
-        };
+      const result = await res.json();
+      const compElapsed = (performance.now() - compStart).toFixed(2);
+      console.log(`[AURA FACE] Server verification: ${compElapsed} ms, status: ${res.status}`);
 
-        console.log('[AURA FACE] Authentication successful');
-
+      if (res.ok && result.success) {
+        console.log('[AURA FACE] Match confirmed! Logging in immediately.');
         setIsSuccess(true);
         setStatusMessage('Identity confirmed');
-        const displayName = enrolledProfile.name || 'User';
+        const displayName = result.name || 'User';
         setVerifiedUserName(displayName);
 
-        // Immediately log the user in
+        const verifiedUser: User = {
+          id: result.uid,
+          uid: result.uid,
+          name: result.name || 'User',
+          email: result.email || email,
+          faceDescriptor: Array.from(data.descriptor),
+        };
+
+        // Complete login immediately
         setTimeout(() => {
           onLogin(verifiedUser);
-        }, 850);
+        }, 800);
         return;
       }
 
-      console.log('[AURA FACE] Match result: NO MATCH');
-
-      // No match in current frame
-      noMatchCountRef.current += 1;
-      if (noMatchCountRef.current >= 12) {
-        setError('Face not recognized. Please try again.');
-        setStatusMessage('Face not recognized');
-        isVerifyingRef.current = false;
-        return;
-      }
-
-      // Unlock for next controlled frame check
+      // Recognition failed - do NOT stay stuck at "Face Detected"
+      console.warn('[AURA FACE] Verification rejected by server:', result.error);
+      const errorMessage = result.error || 'Face not recognized. Please try again.';
+      setError(errorMessage);
+      setStatusMessage(res.status === 404 ? 'Face ID not registered' : 'Face not recognized');
       isVerifyingRef.current = false;
+      setIsVerifying(false);
     } catch (err: any) {
-      console.error("[AURA FACE] Biometric matching error:", err);
+      console.error('[AURA FACE] Network/server verification error:', err);
       setError('Unable to verify Face ID right now. Please try again.');
       setStatusMessage('Verification failed');
       isVerifyingRef.current = false;
+      setIsVerifying(false);
     }
   };
 
   const handleRetry = () => {
     setError(null);
     setIsSuccess(false);
-    uncertainSamplesRef.current = 0;
-    noMatchCountRef.current = 0;
+    setIsVerifying(false);
     isVerifyingRef.current = false;
     recognitionStartRef.current = performance.now();
 
     const email = accountEmail.trim().toLowerCase();
     if (!email || !isValidEmail(email)) {
       setStatusMessage('Enter your account email to use Face ID.');
-      return;
+    } else {
+      setStatusMessage('Looking for your face...');
     }
-
-    setStatusMessage('Looking for your face...');
-    db.getFaceProfileByEmail(email)
-      .then(profile => {
-        cachedProfileRef.current = profile;
-      })
-      .catch(err => {
-        if (err.code === 'NO_FACE_ID_REGISTERED' || err.message?.includes('No Face ID is registered')) {
-          setError('No Face ID is registered for this account. Please sign in with your password and register Face ID.');
-        } else {
-          setError('Unable to verify Face ID right now. Please try again.');
-        }
-      });
   };
 
   const handleCameraError = (errMsg: string) => {
     setError(errMsg);
     setStatusMessage('Biometric scanner unavailable');
+    isVerifyingRef.current = false;
+    setIsVerifying(false);
   };
 
   return (
@@ -232,7 +160,7 @@ export function FaceLogin({ onLogin, onNavigate, initialEmail = '' }: FaceLoginP
       <div className="space-y-4">
         <AnimatePresence mode="wait">
           {error ? (
-            /* Clean Error State */
+            /* Clean Error State with prominent Retry button */
             <motion.div 
               key="error-state"
               initial={{ opacity: 0, scale: 0.96 }}
@@ -246,7 +174,7 @@ export function FaceLogin({ onLogin, onNavigate, initialEmail = '' }: FaceLoginP
               
               <div className="space-y-1">
                 <h3 className="text-base font-semibold text-[#111318]">
-                  {error?.includes('No Face ID') ? 'No Face ID Registered' : 'Face ID Notice'}
+                  {error.includes('No Face ID') ? 'No Face ID Registered' : 'Face Not Recognized'}
                 </h3>
                 <p className="text-xs text-[#626873] max-w-xs mx-auto leading-relaxed">
                   {error}
@@ -309,7 +237,7 @@ export function FaceLogin({ onLogin, onNavigate, initialEmail = '' }: FaceLoginP
               exit={{ opacity: 0 }}
               className="space-y-4"
             >
-              {/* Optional Account Email Locator (Requirement 8) */}
+              {/* Account Email (Required for Face ID resolution) */}
               <div className="max-w-[280px] mx-auto w-full">
                 <Input
                   id="face-email-hint"
@@ -317,7 +245,10 @@ export function FaceLogin({ onLogin, onNavigate, initialEmail = '' }: FaceLoginP
                   placeholder="name@company.com"
                   type="email"
                   value={accountEmail}
-                  onChange={(e) => setAccountEmail(e.target.value)}
+                  onChange={(e) => {
+                    setAccountEmail(e.target.value);
+                    if (error) setError(null);
+                  }}
                   className="h-9 text-xs"
                 />
               </div>
@@ -326,7 +257,7 @@ export function FaceLogin({ onLogin, onNavigate, initialEmail = '' }: FaceLoginP
               <CameraView 
                 onFaceDetected={handleFaceDetected} 
                 statusMessage={statusMessage}
-                isScanning={!isSuccess}
+                isScanning={!isSuccess && !error && !isVerifying}
                 isSuccess={isSuccess}
                 onError={handleCameraError}
               />

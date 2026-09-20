@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { Button } from './ui/Button';
 import { db, ReRegistrationStatus } from '../lib/db';
-import { detectQualityFaceAndEmbedding, loadFaceModels } from '../lib/face';
+import { detectQualityFaceAndEmbedding, loadFaceModels, captureVideoFrameBlob } from '../lib/face';
 
 interface FaceIDReRegistrationModalProps {
   isOpen: boolean;
@@ -188,10 +188,21 @@ export function FaceIDReRegistrationModal({
         throw new Error('Biometric validation failed: Invalid facial embedding.');
       }
 
+      // Capture sample blob from camera if available
+      let sampleBlobs: Blob[] | undefined;
+      if (videoRef.current) {
+        try {
+          const blob = await captureVideoFrameBlob(videoRef.current);
+          sampleBlobs = [blob, blob, blob, blob];
+        } catch (captureErr) {
+          console.warn("[AURA] Sample capture notice during re-registration:", captureErr);
+        }
+      }
+
       setStatusMessage('Updating Face ID in secure enclave...');
 
-      // Replace existing embedding and update lastReRegisteredAt with serverTimestamp()
-      const updatedStatus = await db.reRegisterFaceId(uid, rawArray);
+      // Replace existing samples & embedding in Firebase Storage & Firestore
+      const updatedStatus = await db.reRegisterFaceId(uid, rawArray, 4, sampleBlobs);
 
       // Stop camera tracks immediately on success
       stopCamera();

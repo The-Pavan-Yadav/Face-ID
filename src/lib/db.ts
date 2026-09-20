@@ -1,6 +1,7 @@
-import { auth, db as firestore } from './firebase';
+import { auth, db as firestore, storage } from './firebase';
 import { createUserWithEmailAndPassword, signInWithEmailAndPassword } from 'firebase/auth';
 import { doc, setDoc, getDoc, getDocs, collection, query, where, serverTimestamp, runTransaction } from 'firebase/firestore';
+import { ref, uploadBytes } from 'firebase/storage';
 import { User } from '../types';
 
 export const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000; // 30 days in milliseconds
@@ -48,6 +49,7 @@ export interface SaveFaceProfileParams {
   email: string;
   faceEmbedding: number[];
   sampleCount: number;
+  sampleBlobs?: Blob[];
 }
 
 export interface EnrolledProfile {
@@ -56,6 +58,33 @@ export interface EnrolledProfile {
   email: string;
   embedding: number[];
   sampleCount: number;
+  samplePaths?: string[];
+}
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  timeoutMsg: string,
+  errorCode = 'storage/timeout'
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      const err: any = new Error(timeoutMsg);
+      err.code = errorCode;
+      err.name = 'TimeoutError';
+      reject(err);
+    }, ms);
+
+    promise
+      .then((res) => {
+        clearTimeout(timer);
+        resolve(res);
+      })
+      .catch((err) => {
+        clearTimeout(timer);
+        reject(err);
+      });
+  });
 }
 
 export const db = {
@@ -70,25 +99,14 @@ export const db = {
   },
 
   async saveFaceProfile(uid: string, data: SaveFaceProfileParams): Promise<void> {
-    if (!uid && !auth.currentUser?.uid) {
-      throw new Error('Authenticated UID is required to save face profile.');
-    }
-
-    // Convert to standard, serializable JavaScript Array<number>
-    const embedding = Array.from(data.faceEmbedding || []);
-    if (!embedding.length || embedding.length !== 128 || embedding.some(v => typeof v !== 'number' || isNaN(v))) {
-      throw new Error('Face embedding generation failed.');
-    }
-
-    console.log("Saving face profile...");
-
-    // Ensure we write with the active authenticated user's UID to satisfy request.auth.uid == userId
-    let activeUid = auth.currentUser?.uid || uid;
-    if (!auth.currentUser) {
+    // 4. VERIFY AUTH.CURRENTUSER IS NOT NULL BEFORE UPLOADING
+    let currentUser = auth.currentUser;
+    if (!currentUser) {
+      // Allow brief tick if auth state is propagating
       await new Promise<void>((resolve) => {
         const unsubscribe = auth.onAuthStateChanged((user) => {
           if (user) {
-            activeUid = user.uid;
+            currentUser = user;
           }
           unsubscribe();
           resolve();
@@ -96,62 +114,170 @@ export const db = {
         setTimeout(() => {
           unsubscribe();
           resolve();
-        }, 1000);
+        }, 500);
       });
+      currentUser = auth.currentUser || currentUser;
     }
 
+    if (!currentUser || !currentUser.uid) {
+      const authError: any = new Error('Authentication required: Current user is not signed in before uploading.');
+      authError.code = 'auth/no-current-user';
+      authError.name = 'AuthError';
+      console.error('[AURA STORAGE ERROR]', {
+        code: authError.code,
+        message: authError.message,
+        name: authError.name
+      });
+      throw authError;
+    }
+
+    // Explicitly enforce uid = auth.currentUser.uid
+    const activeUid = currentUser.uid;
+
+    // Convert to standard, serializable JavaScript Array<number>
+    const embedding = Array.from(data.faceEmbedding || []);
+    if (!embedding.length || embedding.length !== 128 || embedding.some(v => typeof v !== 'number' || isNaN(v))) {
+      throw new Error('Face embedding generation failed.');
+    }
+
+    const sampleBlobs = data.sampleBlobs || [];
+    const sampleCount = data.sampleCount || (sampleBlobs.length > 0 ? sampleBlobs.length : 4);
+    const samplePaths: string[] = [];
+
+    // [AURA ENROLL] Samples captured: X
+    console.log(`[AURA ENROLL] Samples captured: ${sampleBlobs.length || sampleCount}`);
+
+    // 1. Upload face samples to Firebase Storage: faceProfiles/{uid}/sample-N.jpg
+    if (sampleBlobs.length > 0) {
+      for (let i = 0; i < sampleBlobs.length; i++) {
+        const sampleNum = i + 1;
+        const blob = sampleBlobs[i];
+
+        // 5. VERIFY IMAGE/BLOB CONVERSION
+        if (!blob || !(blob instanceof Blob) || blob.size === 0) {
+          const blobErr: any = new Error(`Sample ${sampleNum} is invalid or empty.`);
+          blobErr.code = 'storage/invalid-blob';
+          blobErr.name = 'InvalidBlobError';
+          blobErr.sampleIndex = sampleNum;
+          console.error('[AURA STORAGE ERROR]', {
+            code: blobErr.code,
+            message: blobErr.message,
+            name: blobErr.name
+          });
+          throw blobErr;
+        }
+
+        // Before upload, log only: blob.type and blob.size
+        console.log(blob.type);
+        console.log(blob.size);
+
+        console.log(`[AURA ENROLL] Starting sample ${sampleNum} upload`);
+
+        // 4. VERIFY STORAGE PATH: faceProfiles/{uid}/sample-N.jpg
+        const samplePath = `faceProfiles/${activeUid}/sample-${sampleNum}.jpg`;
+        samplePaths.push(samplePath);
+
+        // 2. CATCH EVERY UPLOAD ERROR with proper error handling and timeout
+        try {
+          const storageRef = ref(storage, samplePath);
+          await withTimeout(
+            uploadBytes(storageRef, blob, { contentType: 'image/jpeg' }),
+            12000,
+            `Sample ${sampleNum} upload timed out.`
+          );
+          console.log(`[AURA ENROLL] Sample ${sampleNum} upload complete`);
+        } catch (error: any) {
+          console.error('[AURA STORAGE ERROR]', {
+            code: error?.code || 'storage/upload-failed',
+            message: error?.message || `Failed to upload sample ${sampleNum}`,
+            name: error?.name || 'StorageError'
+          });
+          const enhancedErr: any = new Error(`Sample ${sampleNum} upload failed: ${error?.message || 'Storage error'}`);
+          enhancedErr.code = error?.code || 'storage/upload-failed';
+          enhancedErr.name = error?.name || 'StorageError';
+          enhancedErr.sampleIndex = sampleNum;
+          throw enhancedErr;
+        }
+      }
+    } else {
+      for (let i = 1; i <= sampleCount; i++) {
+        samplePaths.push(`faceProfiles/${activeUid}/sample-${i}.jpg`);
+      }
+    }
+
+    const metadataDocRef = doc(firestore, 'users', activeUid, 'faceProfile', 'metadata');
     const biometricDocRef = doc(firestore, 'users', activeUid, 'faceProfile', 'biometric');
     const userDocRef = doc(firestore, 'users', activeUid);
 
-    const biometricData = {
-      embedding,
+    // 2. Store ONLY metadata in Firestore (no image binary or base64 data)
+    const profileMetadata = {
       registered: true,
-      sampleCount: data.sampleCount || 1,
+      sampleCount,
+      samplePaths,
       createdAt: serverTimestamp(),
       updatedAt: serverTimestamp(),
       lastReRegisteredAt: serverTimestamp(),
       version: 1
     };
 
-    // 1. Authoritative write to Firebase Firestore
+    console.log('[AURA ENROLL] Starting Firestore metadata write');
     try {
-      // Save biometric document at users/{uid}/faceProfile/biometric
-      await setDoc(biometricDocRef, biometricData);
-
-      // Save/merge root user document at users/{uid}
-      await setDoc(userDocRef, {
-        name: data.name,
-        email: data.email.toLowerCase().trim(),
-        registered: true,
-        sampleCount: data.sampleCount || 1,
-        faceDescriptor: embedding,
-        updatedAt: serverTimestamp(),
-        lastReRegisteredAt: serverTimestamp(),
-      }, { merge: true });
-
-      console.log("[AURA FACE] Authoritative biometric profile saved to Firebase");
-    } catch (err: any) {
-      console.warn("[AURA FACE] Firestore document write notice:", err?.message || err);
-      // We also sync with the cross-device backend so other devices can authenticate immediately
-    }
-
-    // 2. Synchronize with cross-device backend store (enables immediate access on phone/other devices)
-    try {
-      await fetch('/api/auth/sync-profile', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          uid: activeUid,
-          name: data.name,
-          email: data.email.toLowerCase().trim(),
-          embedding,
-          sampleCount: data.sampleCount || 1,
-        }),
+      await withTimeout(
+        Promise.all([
+          setDoc(metadataDocRef, profileMetadata),
+          setDoc(biometricDocRef, {
+            ...profileMetadata,
+            embedding,
+          }),
+          setDoc(userDocRef, {
+            name: data.name,
+            email: data.email.toLowerCase().trim(),
+            registered: true,
+            sampleCount,
+            samplePaths,
+            faceDescriptor: embedding,
+            updatedAt: serverTimestamp(),
+            lastReRegisteredAt: serverTimestamp(),
+          }, { merge: true })
+        ]),
+        12000,
+        'Firestore metadata write timed out.',
+        'firestore/timeout'
+      );
+      console.log('[AURA ENROLL] Firestore metadata saved');
+    } catch (error: any) {
+      console.error('[AURA FIRESTORE ERROR]', {
+        code: error?.code || 'firestore/write-failed',
+        message: error?.message || 'Failed to write Firestore metadata',
+        name: error?.name || 'FirestoreError'
       });
-      console.log("[AURA FACE] Biometric profile synced for cross-device authentication");
-    } catch (syncErr: any) {
-      console.warn("[AURA FACE] Cross-device sync notice:", syncErr?.message);
+      throw error;
     }
+
+    // 3. Synchronize with cross-device backend store
+    try {
+      await withTimeout(
+        fetch('/api/auth/sync-profile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            uid: activeUid,
+            name: data.name,
+            email: data.email.toLowerCase().trim(),
+            embedding,
+            sampleCount,
+            samplePaths,
+          }),
+        }),
+        5000,
+        'Cross-device sync timed out',
+        'sync/timeout'
+      );
+    } catch (syncErr: any) {
+      console.warn('[AURA FACE] Cross-device sync notice:', syncErr?.message);
+    }
+
+    console.log('[AURA ENROLL] Enrollment complete');
   },
 
   async checkReRegistrationEligibility(uid: string): Promise<ReRegistrationStatus> {
@@ -245,7 +371,7 @@ export const db = {
     }
   },
 
-  async reRegisterFaceId(uid: string, newEmbedding: number[], sampleCount: number = 1): Promise<ReRegistrationStatus> {
+  async reRegisterFaceId(uid: string, newEmbedding: number[], sampleCount: number = 4, sampleBlobs?: Blob[]): Promise<ReRegistrationStatus> {
     const activeUid = auth.currentUser?.uid || uid;
     if (!auth.currentUser) {
       throw new Error('Authentication required for biometric re-registration.');
@@ -257,6 +383,56 @@ export const db = {
       throw new Error('Invalid face biometric embedding. 128 floating-point values required.');
     }
 
+    const effectiveCount = sampleCount || (sampleBlobs ? sampleBlobs.length : 4);
+    const samplePaths: string[] = [];
+
+    // Replace old face samples in Firebase Storage
+    if (sampleBlobs && sampleBlobs.length > 0) {
+      for (let i = 0; i < sampleBlobs.length; i++) {
+        const sampleNum = i + 1;
+        const blob = sampleBlobs[i];
+        if (!blob || !(blob instanceof Blob) || blob.size === 0) {
+          const blobErr: any = new Error(`Re-registration sample ${sampleNum} is invalid or empty.`);
+          blobErr.code = 'storage/invalid-blob';
+          blobErr.name = 'InvalidBlobError';
+          blobErr.sampleIndex = sampleNum;
+          console.error('[AURA STORAGE ERROR]', {
+            code: blobErr.code,
+            message: blobErr.message,
+            name: blobErr.name
+          });
+          throw blobErr;
+        }
+
+        const samplePath = `faceProfiles/${activeUid}/sample-${sampleNum}.jpg`;
+        samplePaths.push(samplePath);
+        try {
+          const fileRef = ref(storage, samplePath);
+          await withTimeout(
+            uploadBytes(fileRef, blob, { contentType: 'image/jpeg' }),
+            12000,
+            `Upload timed out for re-registration sample ${sampleNum}.`
+          );
+        } catch (uploadErr: any) {
+          console.error('[AURA STORAGE ERROR]', {
+            code: uploadErr?.code || 'storage/upload-failed',
+            message: uploadErr?.message || `Failed to upload re-registration sample ${sampleNum}`,
+            name: uploadErr?.name || 'StorageError'
+          });
+          const enhancedErr: any = new Error(`Sample ${sampleNum} upload failed: ${uploadErr?.message || 'Storage error'}`);
+          enhancedErr.code = uploadErr?.code || 'storage/upload-failed';
+          enhancedErr.name = uploadErr?.name || 'StorageError';
+          enhancedErr.sampleIndex = sampleNum;
+          throw enhancedErr;
+        }
+      }
+    } else {
+      for (let i = 1; i <= effectiveCount; i++) {
+        samplePaths.push(`faceProfiles/${activeUid}/sample-${i}.jpg`);
+      }
+    }
+
+    const metadataDocRef = doc(firestore, 'users', activeUid, 'faceProfile', 'metadata');
     const biometricDocRef = doc(firestore, 'users', activeUid, 'faceProfile', 'biometric');
     const userDocRef = doc(firestore, 'users', activeUid);
 
@@ -281,19 +457,33 @@ export const db = {
           }
         }
 
-        // Atomically replace existing embedding and update server timestamp
+        // Atomically replace existing samples & embedding, updating timestamps
+        const updatedVersion = snap.exists() ? ((snap.data()?.version || 1) + 1) : 1;
+        
+        transaction.set(metadataDocRef, {
+          registered: true,
+          sampleCount: effectiveCount,
+          samplePaths: samplePaths,
+          lastReRegisteredAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+          version: updatedVersion,
+        }, { merge: true });
+
         transaction.set(biometricDocRef, {
           embedding,
           registered: true,
-          sampleCount: sampleCount || 1,
+          sampleCount: effectiveCount,
+          samplePaths: samplePaths,
           lastReRegisteredAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
-          version: snap.exists() ? ((snap.data()?.version || 1) + 1) : 1,
+          version: updatedVersion,
         }, { merge: true });
 
         transaction.set(userDocRef, {
           faceDescriptor: embedding,
           registered: true,
+          sampleCount: effectiveCount,
+          samplePaths: samplePaths,
           lastReRegisteredAt: serverTimestamp(),
           updatedAt: serverTimestamp(),
         }, { merge: true });
@@ -308,6 +498,31 @@ export const db = {
         console.error("[AURA] Biometric re-registration transaction failed:", err);
         throw new Error('Face ID update could not be completed. Please try again.');
       }
+    }
+
+    // Synchronize with cross-device backend
+    try {
+      let userEmail = auth.currentUser.email || '';
+      if (!userEmail) {
+        const uSnap = await getDoc(userDocRef);
+        userEmail = uSnap.data()?.email || '';
+      }
+      if (userEmail) {
+        await fetch('/api/auth/sync-profile', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            uid: activeUid,
+            name: auth.currentUser.displayName || 'User',
+            email: userEmail.toLowerCase().trim(),
+            embedding,
+            sampleCount: effectiveCount,
+            samplePaths,
+          }),
+        });
+      }
+    } catch (syncErr: any) {
+      console.warn("[AURA FACE] Cross-device sync notice:", syncErr?.message);
     }
 
     // Update local storage cache to match

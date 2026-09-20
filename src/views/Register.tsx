@@ -51,7 +51,7 @@ export function Register({ onSuccess, onNavigate }: RegisterProps) {
     }
   };
 
-  const handleFaceEnrolled = async (template: number[], sampleCount: number) => {
+  const handleFaceEnrolled = async (template: number[], sampleCount: number, sampleBlobs?: Blob[]) => {
     if (!createdUid) {
       throw new Error('Authenticated UID is required for biometric registration.');
     }
@@ -61,6 +61,7 @@ export function Register({ onSuccess, onNavigate }: RegisterProps) {
       email: formData.email,
       faceEmbedding: template,
       sampleCount: sampleCount,
+      sampleBlobs: sampleBlobs,
     });
   };
 

@@ -413,3 +413,66 @@ export function createFaceTemplate(samples: Float32Array[]): number[] {
 
   return normalized;
 }
+
+/**
+ * Captures the current video frame as a high-quality JPEG Blob for storage upload
+ */
+export function captureVideoFrameBlob(video: HTMLVideoElement, quality: number = 0.9): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    try {
+      const canvas = document.createElement('canvas');
+      const vWidth = video.videoWidth || 640;
+      const vHeight = video.videoHeight || 480;
+      const size = Math.min(vWidth, vHeight);
+      
+      canvas.width = size;
+      canvas.height = size;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        reject(new Error('Canvas 2D context unavailable'));
+        return;
+      }
+      
+      // Center-crop video frame
+      const sx = (vWidth - size) / 2;
+      const sy = (vHeight - size) / 2;
+      ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size);
+      
+      canvas.toBlob((blob) => {
+        if (blob) {
+          resolve(blob);
+        } else {
+          reject(new Error('Failed to encode video frame as JPEG blob'));
+        }
+      }, 'image/jpeg', quality);
+    } catch (err) {
+      reject(err);
+    }
+  });
+}
+
+/**
+ * Captures current video frame as a JPEG Base64 data URL for fast server API verification
+ */
+export function captureVideoFrameBase64(video: HTMLVideoElement, quality: number = 0.85): string {
+  try {
+    const canvas = document.createElement('canvas');
+    const vWidth = video.videoWidth || 640;
+    const vHeight = video.videoHeight || 480;
+    const size = Math.min(vWidth, vHeight);
+    
+    canvas.width = size;
+    canvas.height = size;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return '';
+    
+    const sx = (vWidth - size) / 2;
+    const sy = (vHeight - size) / 2;
+    ctx.drawImage(video, sx, sy, size, size, 0, 0, size, size);
+    
+    return canvas.toDataURL('image/jpeg', quality);
+  } catch {
+    return '';
+  }
+}
+

@@ -6,6 +6,7 @@ export interface EnrolledBiometricProfile {
   name: string;
   email: string;
   embedding: number[];
+  samplePaths?: string[];
   registered: boolean;
   sampleCount?: number;
   version: number;
@@ -14,7 +15,9 @@ export interface EnrolledBiometricProfile {
   lastReRegisteredAt?: string;
 }
 
-const DATA_DIR = path.join(process.cwd(), 'data');
+// Check writable directory (use /tmp on Vercel/serverless environments)
+const IS_SERVERLESS = Boolean(process.env.VERCEL || process.env.AWS_LAMBDA_FUNCTION_NAME || process.env.NOW_REGION);
+const DATA_DIR = IS_SERVERLESS ? '/tmp' : path.join(process.cwd(), 'data');
 const PROFILES_FILE = path.join(DATA_DIR, 'face-profiles.json');
 
 // In-memory cache keyed by normalized email
@@ -24,7 +27,9 @@ const memoryProfiles = new Map<string, EnrolledBiometricProfile>();
 function initStore() {
   try {
     if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
+      try {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      } catch {}
     }
     if (fs.existsSync(PROFILES_FILE)) {
       const raw = fs.readFileSync(PROFILES_FILE, 'utf-8');
@@ -38,7 +43,7 @@ function initStore() {
       }
     }
   } catch (err) {
-    console.warn('[FaceAuthStore] Init notice:', err);
+    // Non-fatal store initialization
   }
 }
 
@@ -47,12 +52,14 @@ initStore();
 function persistStore() {
   try {
     if (!fs.existsSync(DATA_DIR)) {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
+      try {
+        fs.mkdirSync(DATA_DIR, { recursive: true });
+      } catch {}
     }
     const profilesArray = Array.from(memoryProfiles.values());
     fs.writeFileSync(PROFILES_FILE, JSON.stringify(profilesArray, null, 2), 'utf-8');
   } catch (err) {
-    console.warn('[FaceAuthStore] Persist notice:', err);
+    // Non-fatal write failure (e.g. read-only lambda)
   }
 }
 

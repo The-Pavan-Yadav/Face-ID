@@ -3,7 +3,7 @@ import { Camera, AlertTriangle, ShieldCheck } from 'lucide-react';
 import { detectQualityFaceAndEmbedding, loadFaceModels } from '../lib/face';
 
 interface CameraViewProps {
-  onFaceDetected: (data: { descriptor: Float32Array, landmarks: any, faceDetectedTime?: number }) => void;
+  onFaceDetected: (data: { descriptor: Float32Array, landmarks: any, videoElement?: HTMLVideoElement, faceDetectedTime?: number }) => void;
   statusMessage: string;
   isScanning?: boolean;
   isSuccess?: boolean;
@@ -129,6 +129,7 @@ export function CameraView({
               onFaceDetected({ 
                 descriptor: result.descriptor, 
                 landmarks: result.landmarks,
+                videoElement: videoRef.current || undefined,
                 faceDetectedTime: performance.now()
               });
             } else {

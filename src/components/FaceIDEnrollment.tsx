@@ -1,14 +1,9 @@
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
-  ShieldCheck, 
   Camera, 
   RefreshCw, 
   AlertCircle, 
-  ArrowLeft, 
-  ArrowRight, 
-  ArrowUp, 
-  ArrowDown, 
   Check, 
   Lock,
   Scan
@@ -16,11 +11,12 @@ import {
 import { 
   detectEnrollmentFrame, 
   EnrollmentDetectionResult, 
-  createFaceTemplate 
+  createFaceTemplate,
+  captureVideoFrameBlob
 } from '../lib/face';
 
 export interface FaceIDEnrollmentProps {
-  onComplete: (template: number[], sampleCount: number) => Promise<void> | void;
+  onComplete: (template: number[], sampleCount: number, sampleBlobs?: Blob[]) => Promise<void> | void;
   onSuccess?: () => void;
   onCancel: () => void;
   userName?: string;
@@ -28,53 +24,12 @@ export interface FaceIDEnrollmentProps {
 
 type EnrollmentStep = 
   | 'positioning' 
-  | 'step1_straight' 
-  | 'step2_left' 
-  | 'step3_right' 
-  | 'step4_up' 
-  | 'step5_down' 
+  | 'capturing'
   | 'saving'
   | 'completing';
 
-const STEP_CONFIG = {
-  step1_straight: {
-    index: 1,
-    title: 'Look straight ahead',
-    subtitle: 'Keep your head level, centered, and steady.',
-    icon: Scan,
-    targetProgress: 20,
-  },
-  step2_left: {
-    index: 2,
-    title: 'Slowly turn your head to the left',
-    subtitle: 'Rotate your head gently toward your left side.',
-    icon: ArrowLeft,
-    targetProgress: 40,
-  },
-  step3_right: {
-    index: 3,
-    title: 'Slowly turn your head to the right',
-    subtitle: 'Rotate your head gently toward your right side.',
-    icon: ArrowRight,
-    targetProgress: 60,
-  },
-  step4_up: {
-    index: 4,
-    title: 'Look slightly up',
-    subtitle: 'Tilt your chin slightly upwards toward the ceiling.',
-    icon: ArrowUp,
-    targetProgress: 80,
-  },
-  step5_down: {
-    index: 5,
-    title: 'Look slightly down',
-    subtitle: 'Tilt your chin gently downward.',
-    icon: ArrowDown,
-    targetProgress: 100,
-  },
-};
-
 const TOTAL_TICKS = 48;
+const REQUIRED_SAMPLES = 4;
 
 export function FaceIDEnrollment({ onComplete, onSuccess, onCancel, userName }: FaceIDEnrollmentProps) {
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -84,16 +39,18 @@ export function FaceIDEnrollment({ onComplete, onSuccess, onCancel, userName }: 
   const [cameraError, setCameraError] = useState<string | null>(null);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [currentStep, setCurrentStep] = useState<EnrollmentStep>('positioning');
-  const [overallProgress, setOverallProgress] = useState(0);
-  const [stepProgress, setStepProgress] = useState(0); // 0 - 100 for current movement hold
-  const [feedbackMessage, setFeedbackMessage] = useState<string | null>(null);
+  const [sampleIndex, setSampleIndex] = useState(0); // 0 to 4
+  const [feedbackMessage, setFeedbackMessage] = useState<string | null>('Position your face inside the frame');
   const [isFaceCentered, setIsFaceCentered] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
 
-  // Stored descriptors collected across poses for robust enrollment
+  // Stored descriptors and image Blobs collected across natural samples
   const capturedDescriptorsRef = useRef<Float32Array[]>([]);
+  const capturedBlobsRef = useRef<Blob[]>([]);
   const currentStepRef = useRef<EnrollmentStep>(currentStep);
   currentStepRef.current = currentStep;
+  const isCapturingSampleRef = useRef(false);
+  const lastSampleTimeRef = useRef(0);
 
   // Setup camera stream
   const startCamera = useCallback(async () => {
@@ -138,17 +95,82 @@ export function FaceIDEnrollment({ onComplete, onSuccess, onCancel, userName }: 
     };
   }, [startCamera]);
 
-  // Main enrollment detection loop
+  // Execute biometric save: Combine samples -> template -> upload to Storage & Firestore
+  const executeBiometricSave = useCallback(async () => {
+    const samples = capturedDescriptorsRef.current;
+    const blobs = capturedBlobsRef.current;
+    
+    if (!samples || samples.length === 0) {
+      setSaveError("Please try again.");
+      return;
+    }
+
+    try {
+      setCurrentStep('saving');
+      setIsSaving(true);
+      setFeedbackMessage('Encrypting face profile & uploading samples...');
+
+      // Combine valid sample descriptors into a stable, normalized face template
+      const template = createFaceTemplate(samples);
+      const embedding = Array.from(template);
+
+      if (!embedding.length || embedding.length !== 128) {
+        throw new Error("Face embedding generation failed.");
+      }
+
+      // Add a safety timeout on the overall save execution: 25 seconds
+      const saveExecutionPromise = onComplete(embedding, samples.length, blobs);
+      const overallTimeoutPromise = new Promise((_, reject) => {
+        setTimeout(() => {
+          const timeoutErr: any = new Error("Upload timed out.");
+          timeoutErr.code = 'storage/timeout';
+          timeoutErr.name = 'TimeoutError';
+          reject(timeoutErr);
+        }, 25000);
+      });
+
+      await Promise.race([saveExecutionPromise, overallTimeoutPromise]);
+
+      // Successfully saved to Firebase!
+      setCurrentStep('completing');
+      setSampleIndex(REQUIRED_SAMPLES);
+      setSaveError(null);
+      setFeedbackMessage('Biometric enrollment complete');
+
+      // Allow user to see confirmation before continuing
+      setTimeout(() => {
+        if (onSuccess) {
+          onSuccess();
+        }
+      }, 1400);
+    } catch (err: any) {
+      console.error("[AURA STORAGE ERROR]", {
+        code: err?.code || 'storage/unknown-error',
+        message: err?.message || 'Biometric upload failed',
+        name: err?.name || 'Error'
+      });
+      setIsSaving(false);
+      let failedSampleInfo = "";
+      if (err?.sampleIndex) {
+        failedSampleInfo = `Sample ${err.sampleIndex} upload failed.`;
+      } else if (err?.message && (err.message.includes('Sample') || err.message.includes('sample'))) {
+        failedSampleInfo = err.message;
+      }
+      setSaveError(failedSampleInfo);
+    }
+  }, [onComplete, onSuccess]);
+
+  // Main natural enrollment detection loop (No head movement required)
   useEffect(() => {
     if (!cameraReady || cameraError || saveError) return;
 
     let animId: number;
     let isMounted = true;
-    let consecutiveHold = 0;
-    const REQUIRED_HOLD_FRAMES = 10; // ~250ms of sustained posture
+    let steadyCounter = 0;
 
     async function processFrame() {
       if (!isMounted || !videoRef.current) return;
+      if (currentStepRef.current === 'saving' || currentStepRef.current === 'completing') return;
 
       try {
         const result: EnrollmentDetectionResult = await detectEnrollmentFrame(videoRef.current);
@@ -157,161 +179,79 @@ export function FaceIDEnrollment({ onComplete, onSuccess, onCancel, userName }: 
 
         if (result.status === 'no_face') {
           setIsFaceCentered(false);
-          setFeedbackMessage('Position your face inside the frame');
-          consecutiveHold = 0;
-          setStepProgress(0);
+          steadyCounter = 0;
+          if (capturedDescriptorsRef.current.length === 0) {
+            setFeedbackMessage('Position your face inside the frame');
+          } else {
+            setFeedbackMessage('Face not centered. Look at the camera.');
+          }
         } else if (result.status === 'multiple_faces') {
           setIsFaceCentered(false);
-          setFeedbackMessage('Only one face should be visible.');
-          consecutiveHold = 0;
-          setStepProgress(0);
+          steadyCounter = 0;
+          setFeedbackMessage('Only one face should be visible');
         } else if (result.status === 'single_face') {
-          const { box, pose, descriptor } = result;
+          const { box, descriptor } = result;
 
-          // Check if face is well-sized and centered
           const vWidth = videoRef.current.videoWidth || 640;
           const boxRatio = box.width / vWidth;
-          
+
           if (boxRatio < 0.22) {
-            setFeedbackMessage('Move slightly closer to the camera');
             setIsFaceCentered(false);
-            consecutiveHold = 0;
-            setStepProgress(0);
+            steadyCounter = 0;
+            setFeedbackMessage('Move slightly closer to the camera');
           } else {
             setIsFaceCentered(true);
-            const step = currentStepRef.current;
+            steadyCounter++;
 
-            if (step === 'positioning') {
-              setFeedbackMessage('Preparing secure face profile...');
-              consecutiveHold++;
-              const prog = Math.min((consecutiveHold / 6) * 100, 100);
-              setStepProgress(prog);
+            // Wait for 4 steady frames before capturing first sample
+            if (steadyCounter >= 4 && !isCapturingSampleRef.current) {
+              const now = performance.now();
+              const timeSinceLast = now - lastSampleTimeRef.current;
+              const count = capturedDescriptorsRef.current.length;
 
-              if (consecutiveHold >= 6) {
-                // Initialize enrollment at step 1
-                setCurrentStep('step1_straight');
-                setOverallProgress(20);
-                consecutiveHold = 0;
-                setStepProgress(0);
-                setFeedbackMessage(null);
-              }
-            } else if (step === 'step1_straight') {
-              // Movement: straight ahead
-              if (pose.isStraight) {
-                consecutiveHold++;
-                const holdPct = Math.min((consecutiveHold / REQUIRED_HOLD_FRAMES) * 100, 100);
-                setStepProgress(holdPct);
-                setFeedbackMessage('Hold still...');
+              // Space captures ~350ms apart for natural variations
+              if (count < REQUIRED_SAMPLES && (count === 0 || timeSinceLast >= 350)) {
+                isCapturingSampleRef.current = true;
+                lastSampleTimeRef.current = now;
 
-                if (consecutiveHold >= REQUIRED_HOLD_FRAMES) {
+                try {
+                  // 1. Capture high-quality JPEG blob for Firebase Storage
+                  const blob = await captureVideoFrameBlob(videoRef.current);
+                  capturedBlobsRef.current.push(blob);
                   capturedDescriptorsRef.current.push(descriptor);
-                  console.log(`Face samples collected: ${capturedDescriptorsRef.current.length}`);
-                  setCurrentStep('step2_left');
-                  setOverallProgress(40);
-                  consecutiveHold = 0;
-                  setStepProgress(0);
-                  setFeedbackMessage(null);
-                }
-              } else {
-                consecutiveHold = Math.max(0, consecutiveHold - 1);
-                setStepProgress((consecutiveHold / REQUIRED_HOLD_FRAMES) * 100);
-                setFeedbackMessage('Look directly at the camera');
-              }
-            } else if (step === 'step2_left') {
-              // Movement: turn left
-              if (pose.isTurnLeft || pose.yawRatio > 0.57) {
-                consecutiveHold++;
-                const holdPct = Math.min((consecutiveHold / REQUIRED_HOLD_FRAMES) * 100, 100);
-                setStepProgress(holdPct);
-                setFeedbackMessage('Left turn detected, hold steady...');
 
-                if (consecutiveHold >= REQUIRED_HOLD_FRAMES) {
-                  capturedDescriptorsRef.current.push(descriptor);
-                  console.log(`Face samples collected: ${capturedDescriptorsRef.current.length}`);
-                  setCurrentStep('step3_right');
-                  setOverallProgress(60);
-                  consecutiveHold = 0;
-                  setStepProgress(0);
-                  setFeedbackMessage(null);
-                }
-              } else {
-                consecutiveHold = Math.max(0, consecutiveHold - 1);
-                setStepProgress((consecutiveHold / REQUIRED_HOLD_FRAMES) * 100);
-                setFeedbackMessage('Slowly turn your head to the left');
-              }
-            } else if (step === 'step3_right') {
-              // Movement: turn right
-              if (pose.isTurnRight || pose.yawRatio < 0.43) {
-                consecutiveHold++;
-                const holdPct = Math.min((consecutiveHold / REQUIRED_HOLD_FRAMES) * 100, 100);
-                setStepProgress(holdPct);
-                setFeedbackMessage('Right turn detected, hold steady...');
+                  const nextCount = capturedDescriptorsRef.current.length;
+                  setSampleIndex(nextCount);
+                  setCurrentStep('capturing');
 
-                if (consecutiveHold >= REQUIRED_HOLD_FRAMES) {
-                  capturedDescriptorsRef.current.push(descriptor);
-                  console.log(`Face samples collected: ${capturedDescriptorsRef.current.length}`);
-                  setCurrentStep('step4_up');
-                  setOverallProgress(80);
-                  consecutiveHold = 0;
-                  setStepProgress(0);
-                  setFeedbackMessage(null);
-                }
-              } else {
-                consecutiveHold = Math.max(0, consecutiveHold - 1);
-                setStepProgress((consecutiveHold / REQUIRED_HOLD_FRAMES) * 100);
-                setFeedbackMessage('Slowly turn your head to the right');
-              }
-            } else if (step === 'step4_up') {
-              // Movement: look up
-              if (pose.isLookUp || pose.pitchRatio < 0.74) {
-                consecutiveHold++;
-                const holdPct = Math.min((consecutiveHold / REQUIRED_HOLD_FRAMES) * 100, 100);
-                setStepProgress(holdPct);
-                setFeedbackMessage('Upward tilt detected, hold steady...');
+                  const messages = [
+                    'Sample 1 of 4: Biometric aperture locked',
+                    'Sample 2 of 4: Analyzing facial structure',
+                    'Sample 3 of 4: Validating geometry',
+                    'Sample 4 of 4: Finalizing Face ID profile'
+                  ];
+                  setFeedbackMessage(messages[nextCount - 1] || 'Capturing biometric samples...');
 
-                if (consecutiveHold >= REQUIRED_HOLD_FRAMES) {
-                  capturedDescriptorsRef.current.push(descriptor);
-                  console.log(`Face samples collected: ${capturedDescriptorsRef.current.length}`);
-                  setCurrentStep('step5_down');
-                  setOverallProgress(95);
-                  consecutiveHold = 0;
-                  setStepProgress(0);
-                  setFeedbackMessage(null);
+                  if (nextCount >= REQUIRED_SAMPLES) {
+                    // All 4 samples captured naturally! Proceed to save
+                    isMounted = false;
+                    executeBiometricSave();
+                    return;
+                  }
+                } catch (captureErr) {
+                  console.warn('Sample capture notice:', captureErr);
+                } finally {
+                  isCapturingSampleRef.current = false;
                 }
-              } else {
-                consecutiveHold = Math.max(0, consecutiveHold - 1);
-                setStepProgress((consecutiveHold / REQUIRED_HOLD_FRAMES) * 100);
-                setFeedbackMessage('Tilt your chin slightly up');
-              }
-            } else if (step === 'step5_down') {
-              // Movement: look down
-              if (pose.isLookDown || pose.pitchRatio > 1.25) {
-                consecutiveHold++;
-                const holdPct = Math.min((consecutiveHold / REQUIRED_HOLD_FRAMES) * 100, 100);
-                setStepProgress(holdPct);
-                setFeedbackMessage('Downward tilt detected...');
-
-                if (consecutiveHold >= REQUIRED_HOLD_FRAMES) {
-                  capturedDescriptorsRef.current.push(descriptor);
-                  console.log(`Face samples collected: ${capturedDescriptorsRef.current.length}`);
-                  consecutiveHold = 0;
-                  setStepProgress(100);
-                  executeBiometricSave();
-                  return;
-                }
-              } else {
-                consecutiveHold = Math.max(0, consecutiveHold - 1);
-                setStepProgress((consecutiveHold / REQUIRED_HOLD_FRAMES) * 100);
-                setFeedbackMessage('Tilt your chin slightly down');
               }
             }
           }
         }
       } catch (err) {
-        console.error('Frame detection error:', err);
+        console.error('Enrollment detection error:', err);
       }
 
-      if (isMounted && currentStepRef.current !== 'saving' && currentStepRef.current !== 'completing') {
+      if (isMounted) {
         animId = requestAnimationFrame(processFrame);
       }
     }
@@ -322,94 +262,26 @@ export function FaceIDEnrollment({ onComplete, onSuccess, onCancel, userName }: 
       isMounted = false;
       if (animId) cancelAnimationFrame(animId);
     };
-  }, [cameraReady, cameraError, saveError]);
-
-  // Execute biometric save: Combine samples -> template -> Firestore save
-  const executeBiometricSave = async () => {
-    const samples = capturedDescriptorsRef.current;
-    
-    if (!samples || samples.length === 0) {
-      setSaveError("Couldn't securely save your Face ID. Please try again.");
-      return;
-    }
-
-    try {
-      setCurrentStep('saving');
-      setIsSaving(true);
-      setFeedbackMessage('Generating face template...');
-
-      // Combine valid sample descriptors into a stable, normalized face template
-      const template = createFaceTemplate(samples);
-      const embedding = Array.from(template);
-
-      if (!embedding.length || embedding.length !== 128) {
-        throw new Error("Face embedding generation failed.");
-      }
-
-      // Attempt to securely save the face profile to Firebase Firestore
-      await onComplete(embedding, samples.length);
-
-      // Successfully saved to Firestore!
-      setCurrentStep('completing');
-      setOverallProgress(100);
-      setStepProgress(100);
-      setSaveError(null);
-      setFeedbackMessage('Biometric enrollment complete');
-
-      // Allow the user to see the success state ("Face ID setup complete") before continuing
-      setTimeout(() => {
-        if (onSuccess) {
-          onSuccess();
-        }
-      }, 1600);
-    } catch (err: any) {
-      // Log the technical error to console for development
-      console.warn("Firebase Face ID save error:", err);
-      
-      // Do NOT show successful registration; display clear error
-      setIsSaving(false);
-      setSaveError("Couldn't securely save your Face ID. Please try again.");
-    }
-  };
+  }, [cameraReady, cameraError, saveError, executeBiometricSave]);
 
   const resetEnrollment = () => {
     capturedDescriptorsRef.current = [];
+    capturedBlobsRef.current = [];
+    isCapturingSampleRef.current = false;
+    lastSampleTimeRef.current = 0;
     setSaveError(null);
     setIsSaving(false);
-    setOverallProgress(0);
-    setStepProgress(0);
-    setFeedbackMessage(null);
+    setSampleIndex(0);
+    setFeedbackMessage('Position your face inside the frame');
     setCurrentStep('positioning');
+    startCamera();
   };
 
-  // Dynamic progress computation
-  const stepConfig = STEP_CONFIG[currentStep as keyof typeof STEP_CONFIG];
-  const stepBaseProgress = stepConfig ? (stepConfig.index - 1) * 20 : 0;
-  const currentStepContribution = stepConfig ? (stepProgress / 100) * 20 : 0;
-  const displayProgress = currentStep === 'completing' 
+  // Progress computation based on captured samples (0 -> 25% -> 50% -> 75% -> 100%)
+  const progressPercent = currentStep === 'completing' 
     ? 100 
-    : Math.max(overallProgress, stepBaseProgress + currentStepContribution);
-  const activeTicksCount = Math.min(TOTAL_TICKS, Math.round((displayProgress / 100) * TOTAL_TICKS));
-
-  const skipCurrentStep = () => {
-    const stepOrder: EnrollmentStep[] = [
-      'step1_straight',
-      'step2_left',
-      'step3_right',
-      'step4_up',
-      'step5_down',
-    ];
-    const currentIndex = stepOrder.indexOf(currentStep);
-    if (currentIndex >= 0 && currentIndex < stepOrder.length - 1) {
-      const nextStep = stepOrder[currentIndex + 1];
-      setCurrentStep(nextStep);
-      setOverallProgress((currentIndex + 2) * 20);
-      setStepProgress(0);
-      setFeedbackMessage(null);
-    } else if (currentIndex === stepOrder.length - 1) {
-      executeBiometricSave();
-    }
-  };
+    : Math.min(100, Math.round((sampleIndex / REQUIRED_SAMPLES) * 100));
+  const activeTicksCount = Math.min(TOTAL_TICKS, Math.round((progressPercent / 100) * TOTAL_TICKS));
 
   return (
     <div className="min-h-screen bg-slate-50/50 flex flex-col justify-between py-6 px-4 sm:px-6 lg:px-8 font-sans text-slate-900 select-none">
@@ -435,7 +307,7 @@ export function FaceIDEnrollment({ onComplete, onSuccess, onCancel, userName }: 
 
       {/* Main Center Enrollment Content */}
       <div className="w-full max-w-md mx-auto my-auto flex flex-col items-center text-center">
-        {/* Firebase Saving Error State */}
+        {/* Error State with clear Retry button */}
         {saveError ? (
           <motion.div 
             initial={{ opacity: 0, scale: 0.96 }}
@@ -446,10 +318,13 @@ export function FaceIDEnrollment({ onComplete, onSuccess, onCancel, userName }: 
               <AlertCircle className="w-7 h-7" />
             </div>
             <div className="space-y-2">
-              <h3 className="text-lg font-semibold text-slate-900">Enrollment Unsuccessful</h3>
-              <p className="text-sm text-slate-600 leading-relaxed max-w-xs mx-auto">
-                {saveError}
-              </p>
+              <h3 className="text-lg font-semibold text-slate-900">Couldn't secure your Face ID.</h3>
+              {saveError && (
+                <p className="text-sm text-slate-600 leading-relaxed max-w-xs mx-auto">
+                  {saveError}
+                </p>
+              )}
+              <p className="text-xs text-slate-500 font-medium">Please try again.</p>
             </div>
             <div className="pt-2 flex flex-col sm:flex-row gap-3 justify-center">
               <button
@@ -458,7 +333,7 @@ export function FaceIDEnrollment({ onComplete, onSuccess, onCancel, userName }: 
                 className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-slate-900 text-white text-sm font-medium hover:bg-slate-800 transition-colors shadow-sm"
               >
                 <RefreshCw className="w-4 h-4" />
-                Try Enrollment Again
+                Try Again
               </button>
               <button
                 type="button"
@@ -538,10 +413,30 @@ export function FaceIDEnrollment({ onComplete, onSuccess, onCancel, userName }: 
                       Securing Face Profile...
                     </h2>
                     <p className="text-xs text-slate-500 font-medium">
-                      Saving encrypted biometric template to Firebase
+                      Uploading samples to Firebase Storage & syncing metadata
                     </p>
                   </motion.div>
-                ) : currentStep === 'positioning' ? (
+                ) : currentStep === 'capturing' ? (
+                  <motion.div
+                    key="capturing-header"
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -8 }}
+                    className="space-y-1.5"
+                  >
+                    <div className="flex items-center justify-center gap-1.5 mb-1">
+                      <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wider uppercase bg-slate-900 text-white">
+                        Sample {sampleIndex} of {REQUIRED_SAMPLES}
+                      </span>
+                    </div>
+                    <h2 className="text-2xl font-bold tracking-tight text-slate-900">
+                      Hold still for natural capture
+                    </h2>
+                    <p className="text-xs text-slate-500 font-medium max-w-xs mx-auto">
+                      Look naturally at the camera — no head movement required.
+                    </p>
+                  </motion.div>
+                ) : (
                   <motion.div
                     key="positioning-header"
                     initial={{ opacity: 0, y: 8 }}
@@ -556,33 +451,15 @@ export function FaceIDEnrollment({ onComplete, onSuccess, onCancel, userName }: 
                     <h2 className="text-2xl font-bold tracking-tight text-slate-900">
                       Position your face inside the frame
                     </h2>
-                  </motion.div>
-                ) : (
-                  <motion.div
-                    key={currentStep}
-                    initial={{ opacity: 0, y: 8 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -8 }}
-                    className="space-y-1.5"
-                  >
-                    {/* Step pill indicator */}
-                    <div className="flex items-center justify-center gap-1.5 mb-1">
-                      <span className="px-2.5 py-0.5 rounded-full text-[11px] font-bold tracking-wider uppercase bg-slate-900 text-white">
-                        Step {STEP_CONFIG[currentStep as keyof typeof STEP_CONFIG]?.index || 1} of 5
-                      </span>
-                    </div>
-                    <h2 className="text-2xl font-bold tracking-tight text-slate-900">
-                      {STEP_CONFIG[currentStep as keyof typeof STEP_CONFIG]?.title}
-                    </h2>
                     <p className="text-xs text-slate-500 font-medium max-w-xs mx-auto">
-                      {STEP_CONFIG[currentStep as keyof typeof STEP_CONFIG]?.subtitle}
+                      Ensure good lighting and look straight ahead.
                     </p>
                   </motion.div>
                 )}
               </AnimatePresence>
             </div>
 
-            {/* The Central Circular Face ID Scanner with Apple-style Radial Ticks */}
+            {/* The Central Circular Face ID Scanner with Radial Ticks */}
             <div className="relative flex items-center justify-center my-3">
               {/* Outer SVG Segmented Ticks Ring */}
               <div className="relative w-[300px] h-[300px] sm:w-[340px] sm:h-[340px] flex items-center justify-center">
@@ -652,162 +529,80 @@ export function FaceIDEnrollment({ onComplete, onSuccess, onCancel, userName }: 
                     }`}
                   />
 
-                  {/* Face outline / Biometric Reticle Overlay */}
-                  <div className="absolute inset-0 pointer-events-none flex items-center justify-center">
-                    {/* Biometric Head Oval Guide */}
-                    <div
-                      className={`w-[155px] h-[200px] rounded-[70px] border-2 transition-all duration-300 ${
-                        currentStep === 'completing'
-                          ? 'border-emerald-500/80 scale-95'
-                          : isFaceCentered
-                          ? 'border-white/70 shadow-[0_0_15px_rgba(255,255,255,0.25)]'
-                          : 'border-white/30'
-                      }`}
-                    />
-
-                    {/* Corner biometric reticles */}
-                    <div className="absolute inset-6 border border-white/10 rounded-full" />
-                  </div>
-
-                  {/* Vertical animated scanning line during active tracking */}
-                  {isFaceCentered && currentStep !== 'completing' && (
-                    <motion.div
-                      initial={{ y: -140 }}
-                      animate={{ y: 140 }}
-                      transition={{
-                        repeat: Infinity,
-                        repeatType: 'reverse',
-                        duration: 1.8,
-                        ease: 'easeInOut',
-                      }}
-                      className="absolute inset-x-0 h-1 bg-gradient-to-b from-white/0 via-white/50 to-white/0 pointer-events-none"
-                    />
+                  {/* Camera Initializing Overlay */}
+                  {!cameraReady && (
+                    <div className="absolute inset-0 flex flex-col items-center justify-center text-slate-400 bg-slate-900">
+                      <RefreshCw className="w-8 h-8 animate-spin mb-2 text-slate-500" />
+                      <span className="text-xs font-medium">Starting camera...</span>
+                    </div>
                   )}
 
-                  {/* Success State Overlay */}
-                  <AnimatePresence>
-                    {currentStep === 'completing' && (
-                      <motion.div
-                        initial={{ opacity: 0 }}
-                        animate={{ opacity: 1 }}
-                        className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm flex flex-col items-center justify-center text-white"
-                      >
-                        <motion.div
-                          initial={{ scale: 0.5, rotate: -20, opacity: 0 }}
-                          animate={{ scale: 1, rotate: 0, opacity: 1 }}
-                          transition={{ type: 'spring', damping: 14, stiffness: 200 }}
-                          className="w-16 h-16 rounded-full bg-white text-slate-900 flex items-center justify-center shadow-lg"
-                        >
-                          <Check className="w-8 h-8 stroke-[3]" />
-                        </motion.div>
-                        <motion.p
-                          initial={{ opacity: 0, y: 8 }}
-                          animate={{ opacity: 1, y: 0 }}
-                          transition={{ delay: 0.2 }}
-                          className="mt-3 text-xs font-semibold tracking-wider uppercase text-white/90"
-                        >
-                          Enrolled
-                        </motion.p>
-                      </motion.div>
-                    )}
-                  </AnimatePresence>
+                  {/* Positioning Face Outline Guide */}
+                  {cameraReady && currentStep !== 'completing' && (
+                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                      <div 
+                        className={`w-40 h-52 sm:w-44 sm:h-56 rounded-[48px] border-2 border-dashed transition-all duration-300 ${
+                          isFaceCentered 
+                            ? 'border-emerald-400/90 scale-100' 
+                            : 'border-white/40 scale-95'
+                        }`} 
+                      />
+                    </div>
+                  )}
+
+                  {/* Success Overlay with Checkmark */}
+                  {currentStep === 'completing' && (
+                    <motion.div
+                      initial={{ opacity: 0, scale: 0.8 }}
+                      animate={{ opacity: 1, scale: 1 }}
+                      className="absolute inset-0 bg-slate-900/40 backdrop-blur-xs flex items-center justify-center"
+                    >
+                      <div className="w-20 h-20 rounded-full bg-slate-900 text-white flex items-center justify-center shadow-lg border-2 border-white/20">
+                        <Check className="w-10 h-10 stroke-[2.5]" />
+                      </div>
+                    </motion.div>
+                  )}
                 </div>
               </div>
             </div>
 
-            {/* Dynamic Status / Feedback Message */}
-            <div className="h-10 flex items-center justify-center mt-2 px-4">
-              <AnimatePresence mode="wait">
-                {feedbackMessage ? (
-                  <motion.div
-                    key={feedbackMessage}
-                    initial={{ opacity: 0, y: 4 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -4 }}
-                    className={`text-xs font-medium px-3.5 py-1.5 rounded-full flex items-center gap-1.5 ${
-                      feedbackMessage.includes('Only one')
-                        ? 'bg-red-50 text-red-700 border border-red-200'
-                        : feedbackMessage.includes('Hold still') || feedbackMessage.includes('detected')
-                        ? 'bg-slate-900 text-white shadow-sm'
-                        : 'bg-white border border-slate-200 text-slate-700 shadow-sm'
-                    }`}
-                  >
-                    {feedbackMessage.includes('Only one') && (
-                      <AlertCircle className="w-3.5 h-3.5 text-red-500" />
-                    )}
-                    {stepConfig?.icon && currentStep !== 'positioning' && currentStep !== 'completing' && !feedbackMessage.includes('Only one') && (
-                      <stepConfig.icon className="w-3.5 h-3.5 text-current" />
-                    )}
-                    {feedbackMessage}
-                  </motion.div>
-                ) : (
-                  <div className="text-xs text-slate-400 font-medium">
-                    Follow on-screen motion prompts
-                  </div>
-                )}
-              </AnimatePresence>
-            </div>
-
-            {/* 5-Step Segmented Progress Pills */}
-            <div className="w-full max-w-xs flex items-center justify-center gap-2 mt-4">
-              {[1, 2, 3, 4, 5].map(stepNum => {
-                const isStepCompleted = (overallProgress / 20) >= stepNum;
-                const isCurrent = 
-                  currentStep !== 'completing' && 
-                  currentStep !== 'positioning' && 
-                  STEP_CONFIG[currentStep as keyof typeof STEP_CONFIG]?.index === stepNum;
-
-                return (
-                  <div
-                    key={stepNum}
-                    className="flex-1 h-1.5 rounded-full overflow-hidden bg-slate-200/80"
-                  >
-                    <div
-                      className={`h-full transition-all duration-300 rounded-full ${
-                        isStepCompleted
-                          ? 'bg-slate-900 w-full'
-                          : isCurrent
-                          ? 'bg-slate-900'
-                          : 'w-0'
-                      }`}
-                      style={{
-                        width: isStepCompleted
-                          ? '100%'
-                          : isCurrent
-                          ? `${Math.max(stepProgress, 15)}%`
-                          : '0%',
-                      }}
-                    />
-                  </div>
-                );
-              })}
-            </div>
-
-            {/* Subtle Motion Skip Option */}
-            {currentStep !== 'positioning' && currentStep !== 'completing' && currentStep !== 'saving' && (
-              <div className="mt-3">
-                <button
-                  type="button"
-                  onClick={skipCurrentStep}
-                  className="text-[11px] font-medium text-slate-400 hover:text-slate-700 transition-colors"
-                >
-                  Having trouble? Skip this movement
-                </button>
+            {/* Bottom Status Feedback Pill */}
+            <div className="mt-4 flex flex-col items-center gap-2">
+              <div className="inline-flex items-center gap-2 px-4 py-1.5 rounded-full bg-white border border-slate-200/80 shadow-xs text-xs font-medium text-slate-700">
+                <span className={`w-2 h-2 rounded-full transition-colors duration-300 ${
+                  currentStep === 'completing' 
+                    ? 'bg-emerald-500' 
+                    : isFaceCentered 
+                    ? 'bg-emerald-500' 
+                    : 'bg-amber-400'
+                }`} />
+                <span>{feedbackMessage}</span>
               </div>
-            )}
+
+              {/* Sample Indicator Dots */}
+              <div className="flex items-center gap-1.5 mt-1">
+                {Array.from({ length: REQUIRED_SAMPLES }).map((_, i) => (
+                  <div
+                    key={i}
+                    className={`w-2 h-2 rounded-full transition-all duration-300 ${
+                      i < sampleIndex
+                        ? 'bg-slate-900 scale-110'
+                        : 'bg-slate-200'
+                    }`}
+                  />
+                ))}
+              </div>
+            </div>
           </div>
         )}
       </div>
 
-      {/* Bottom Privacy & Trust Footer */}
-      <div className="w-full max-w-md mx-auto pt-4 pb-2 border-t border-slate-100 flex flex-col items-center text-center space-y-1">
-        <div className="flex items-center gap-1.5 text-xs text-slate-500 font-medium">
-          <ShieldCheck className="w-3.5 h-3.5 text-slate-600" />
-          <span>Your face data is used only for authentication.</span>
+      {/* Footer / Enclave Badge */}
+      <div className="w-full max-w-lg mx-auto flex items-center justify-center pt-4">
+        <div className="flex items-center gap-2 text-[11px] text-slate-400 font-medium">
+          <Lock className="w-3.5 h-3.5" />
+          <span>Samples stored in Firebase Storage • Metadata in Firestore</span>
         </div>
-        <p className="text-[11px] text-slate-400 max-w-xs">
-          Biometric features are computed into irreversible mathematical descriptors. No images or videos are ever uploaded or saved.
-        </p>
       </div>
     </div>
   );

@@ -36,7 +36,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
   try {
     const body = await parseJsonBody(req);
-    const { uid, name, email, embedding, sampleCount } = body || {};
+    const { uid, name, email, embedding, sampleCount, samplePaths } = body || {};
 
     if (!uid || !email || !Array.isArray(embedding) || embedding.length !== 128) {
       res.statusCode = 400;
@@ -50,8 +50,9 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       name: name || 'User',
       email,
       embedding,
+      samplePaths: Array.isArray(samplePaths) ? samplePaths : undefined,
       registered: true,
-      sampleCount: sampleCount || 1,
+      sampleCount: sampleCount || 4,
       version: 1
     });
 

@@ -197,68 +197,79 @@ async function startServer() {
 
   app.post('/api/auth/face-login', async (req, res) => {
     try {
-      const { descriptor } = req.body;
-      if (!descriptor || !Array.isArray(descriptor)) {
+      const { descriptor, email } = req.body;
+      if (!descriptor || !Array.isArray(descriptor) || descriptor.length !== 128) {
         return res.status(400).json({ error: 'Invalid face descriptor' });
       }
 
-      if (!isFirebaseAdminInitialized) {
-        return res.status(503).json({
-          error: 'Firebase Admin credentials are not configured on the server. Please sign in with email and password, or add your Firebase Service Account JSON (from Firebase Console > Project Settings > Service Accounts) to FIREBASE_SERVICE_ACCOUNT_KEY.'
-        });
+      if (!email || typeof email !== 'string' || !email.includes('@')) {
+        return res.status(400).json({ error: 'Enter your account email to use Face ID.' });
       }
 
-      const db = getFirestore();
-      
-      let matchedUid: string | null = null;
-      let minDistance = Infinity;
-      const THRESHOLD = 0.45; // Stricter biometric verification threshold
+      const normalizedEmail = email.toLowerCase().trim();
+      const THRESHOLD = 0.45;
 
-      // 1. Query biometric embeddings from users/{uid}/faceProfile/{docId}
-      try {
-        const biometricSnapshot = await db.collectionGroup('faceProfile').get();
-        biometricSnapshot.forEach(doc => {
-          const data = doc.data();
-          const embedding = data.embedding || data.faceEmbedding;
-          if (embedding && Array.isArray(embedding) && embedding.length === 128) {
-            const distance = euclideanDistance(descriptor, embedding);
-            if (distance < minDistance && distance < THRESHOLD) {
-              minDistance = distance;
-              // Subcollection parent is /users/{uid}/faceProfile, parent.parent is /users/{uid}
-              matchedUid = doc.ref.parent?.parent?.id || doc.id;
+      // 1. Resolve from faceAuthStore
+      let profile = faceAuthStore.getProfileByEmail(normalizedEmail);
+
+      // 2. Fallback to Firestore if Firebase Admin is configured and profile not in memory
+      if ((!profile || !profile.embedding) && isFirebaseAdminInitialized) {
+        try {
+          const db = getFirestore();
+          const usersSnap = await db.collection('users').where('email', '==', normalizedEmail).limit(1).get();
+          if (!usersSnap.empty) {
+            const uDoc = usersSnap.docs[0];
+            const uData = uDoc.data();
+            const bioSnap = await db.doc(`users/${uDoc.id}/faceProfile/biometric`).get();
+            const bioData = bioSnap.data();
+            const emb = bioData?.embedding || uData.faceDescriptor;
+            if (emb && Array.isArray(emb) && emb.length === 128) {
+              profile = {
+                uid: uDoc.id,
+                name: uData.name || 'User',
+                email: normalizedEmail,
+                embedding: emb,
+                registered: true,
+                sampleCount: bioData?.sampleCount || 4,
+                version: 1,
+              };
+              faceAuthStore.saveProfile(profile);
             }
           }
-        });
-      } catch (cgErr) {
-        console.warn("CollectionGroup faceProfile query notice:", cgErr);
+        } catch (dbErr) {
+          console.warn("[FaceLogin] Firestore lookup notice:", dbErr);
+        }
       }
 
-      // 2. Also check root user documents for backwards compatibility
-      if (!matchedUid) {
-        const usersSnapshot = await db.collection('users').get();
-        usersSnapshot.forEach(doc => {
-          const data = doc.data();
-          const embedding = data.faceProfile?.embedding || data.faceProfile?.faceEmbedding || data.faceDescriptor;
-          if (embedding && Array.isArray(embedding) && embedding.length === 128) {
-            const distance = euclideanDistance(descriptor, embedding);
-            if (distance < minDistance && distance < THRESHOLD) {
-              minDistance = distance;
-              matchedUid = doc.id;
-            }
-          }
+      if (!profile || !profile.embedding || profile.embedding.length !== 128) {
+        return res.status(404).json({
+          error: 'No Face ID is registered for this account. Please sign in with your password and register Face ID.'
         });
       }
 
-      if (matchedUid) {
-        // Mint a custom token for the verified user
-        const customToken = await getAuth().createCustomToken(matchedUid);
-        return res.json({ token: customToken });
+      const dist = euclideanDistance(descriptor, profile.embedding);
+
+      if (dist < THRESHOLD) {
+        let customToken: string | undefined;
+        if (isFirebaseAdminInitialized) {
+          try {
+            customToken = await getAuth().createCustomToken(profile.uid);
+          } catch {}
+        }
+
+        return res.json({
+          success: true,
+          uid: profile.uid,
+          name: profile.name,
+          email: profile.email,
+          token: customToken,
+        });
       } else {
-        return res.status(401).json({ error: 'Face not recognized' });
+        return res.status(401).json({ error: 'Face not recognized. Please try again.' });
       }
     } catch (error: any) {
       console.error("Face login error:", error);
-      res.status(500).json({ error: error.message || 'Internal server error' });
+      return res.status(500).json({ error: 'Unable to verify Face ID right now. Please try again.' });
     }
   });
 
